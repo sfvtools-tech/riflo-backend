@@ -2,7 +2,7 @@
 
 `.github/workflows/ci.yml` checks pull requests, pushes to `main`, and manual runs. Only successful pushes to `main` deploy. Pull requests and manual runs never obtain a cloud identity. CI uses Node 24.22.2 because locked Firebase packages require Node >=24.12.0; the production VM has been upgraded and verified on Node 24.22.2.
 
-Checks run on Ubuntu 22.04 with Java 21, pinned Firebase CLI and the existing pinned media installer. Auth, Firestore and Storage use a fresh `demo-riflo` emulator project. The complete test suite must finish with zero skips. Linux production dependencies are pruned after testing and packaged with compiled code, package manifests and a release identity. Only the archive and its SHA-256 file enter the one-day GitHub artifact; environment files and cloud credentials are excluded.
+Checks run on Ubuntu 22.04 with Java 21, Python 3.11.18, pinned Firebase CLI and the existing pinned media installer. Auth, Firestore and Storage use a fresh `demo-riflo` emulator project. The complete test suite must finish with zero skips. Linux production dependencies are pruned after testing and packaged with compiled code, package manifests and a release identity. Only the archive and its SHA-256 file enter the one-day GitHub artifact; environment files and cloud credentials are excluded.
 
 Protect `main` with pull requests and the required `Backend checks` status check. No approval gate is configured by this workflow.
 

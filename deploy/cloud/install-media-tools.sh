@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
-python3 -m venv /opt/riflo-tools
+python_bin=${PYTHON_BIN:-python3}
+command -v "$python_bin" >/dev/null
+"$python_bin" -c 'import sys; assert sys.version_info >= (3, 11), "yt-dlp requires Python 3.11 or newer"'
+"$python_bin" -m venv /opt/riflo-tools
 /opt/riflo-tools/bin/pip install 'yt-dlp[default]==2026.10.26' 'yt-dlp-ejs==0.8.0'
 archive=ffmpeg-n9.0.2-42-gd7643a0fe3-linux64-gpl-9.0.tar.xz
 url=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-11-01-12-49

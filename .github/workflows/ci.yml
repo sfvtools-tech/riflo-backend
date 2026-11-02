@@ -28,11 +28,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11.18'
       - name: Install test tools
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-venv fonts-noto-core fonts-noto-cjk
-          sudo bash deploy/cloud/install-media-tools.sh
+          sudo env PYTHON_BIN="$(command -v python3)" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" bash deploy/cloud/install-media-tools.sh
           npm install --global firebase-tools@15.34.2
       - run: npm ci
       - run: npm run typecheck
