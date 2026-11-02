@@ -1,0 +1,14 @@
+[Unit]
+Description=Restricted public network for Riflo source tools
+Before=riflo@server.service riflo@worker.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/riflo/source-network.env
+ExecStart=/usr/local/sbin/riflo-source-network
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

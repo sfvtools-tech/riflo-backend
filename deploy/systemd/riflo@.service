@@ -1,0 +1,33 @@
+[Unit]
+Description=Riflo %i
+After=network-online.target riflo-source-network.service
+Requires=riflo-source-network.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=riflo
+Group=riflo
+WorkingDirectory=/opt/riflo/current
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/riflo/runtime.env
+ExecStart=/usr/bin/node dist/%i.js
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=180
+SendSIGKILL=yes
+NoNewPrivileges=no
+# Narrow sudo launcher enters the downloader network then drops privilege.
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

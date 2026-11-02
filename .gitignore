@@ -1,0 +1,31 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+.firebase/
+*service-account*.json
+*credentials*.json
+coverage/
+
+dist/
+
+# Local generated evidence and private planning notes.
+.DS_Store
+artifacts/
+TEMP_*.md
+/deploy/cloud/inventory.json
+/deploy/README.md
+/docs/*-20??-??-??.*
+/docs/implementation-assumptions-and-attention.md
+/docs/implementation-completion-report.md
+/docs/deployment-decisions.md
+/docs/production-readiness-work.md
+/docs/finished-output-validation-report.md
+/docs/generation-controls-and-output-validation-decisions.md
+
+# Local credentials and caches.
+*.pem
+*.key
+__pycache__/
+*.py[cod]

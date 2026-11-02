@@ -1,0 +1,62 @@
+# Bounded internal video-plan selection — engineering plan only
+
+## Decision
+
+Replace provider-selected numeric endpoints with one internal plan ID, resolved to the existing timestamp content before persistence. Keep Auto offering actual one-, two-, and three-cut plans; Continuous offers only one-cut plans. This removes duration arithmetic from the model's output responsibilities. It does **not** establish standalone meaning or finished-media quality. No implementation, provider calls, Claude invocation, rendering, or cloud mutation was performed for this plan. Ponytail and grilling instructions were read; this is the authorized planning deliverable, not authorization inferred to implement it.
+
+## Actual evidence and current path
+
+Inspected `providers.ts`, `short-video-source.ts`, `prompts/short-video.ts`, `validation.ts`, `video.ts`, associated boundary/plan tests, and the recorded source/review. Source provenance: 1,369.721905 seconds, 4,495 words. An actual local read-only enumeration using `shortVideoBoundaries` found 380 sentence rows and 352 safe starts / 352 safe ends. Review's latest-two-ends-under-each-15/30/45/60-second-band rule produces 2,425 unique continuous candidates. It includes **both** the better contextual span 196.79001–246.855 and the semantically deficient v7 span 204.47–251.18. Full sentence payload alone is 31,933 UTF-8 bytes. These measurements are not a token/cost or quality estimate.
+
+The current provider schema independently enumerates starts and ends. Its legal endpoints can produce illegal 60.425-second selections. `prepareProviderShortVideoSelection` checks sentence membership on top of authoritative timestamp validation. `video.ts` consumes canonical timestamp segments, concatenates original source audio/video, and applies optional Clean captions. Saved legacy single-range plans normalize at `checkShortVideo`; do not make their acceptance depend on the new shortlist.
+
+The supplied media review establishes clean sampled caption placement and strong original-audio correlation; it did not establish listening, full playback, or semantic success. Fixing provider arithmetic cannot promote that result into a media pass.
+
+## Candidate construction: explicit modest policy
+
+Use one builder beside the existing sentence/boundary helpers, not a new selection service. Build from the full validated transcript and the existing full-source-safe boundary table. Null endpoints remain unusable cuts, but internal rows and all out-of-window prose remain available as context.
+
+Let N be sentence rows and W word count. For each safe starting row and each total-duration band B in {15,30,45,60}:
+
+1. **One cut:** latest two safe terminal ends no later than start+B; discard durations below 10 seconds. This is the review's bounded continuous policy, not a semantic ranking rule.
+2. **Two cuts:** construct two templates: a local omission and a spread omission. Local skips one complete sentence row. Spread advances to the first safe start at or after `previousEnd + (windowEnd - previousEnd)/(remainingCuts + 1)`, distributing excerpts into later source regions. Select the latest safe end fitting B/2 from the starting row. Begin the second excerpt at the template's next safe sentence start, strictly after the first selected word range; require at least one omitted sentence row even for spread. Its end is the latest safe terminal end fitting the remaining budget B minus the first excerpt's actual duration.
+3. **Three cuts:** same local/spread templates, with a first budget B/3, a second budget (B minus actual first duration)/2, and a third budget equal to the actual remainder. Each next excerpt starts after the template's omitted interval, using the current remaining cut count for spread. Abort a template when an excerpt cannot retain positive-duration speech with safe endpoints. Do not insert an invented window edge or repair a failed template by clipping a sentence.
+
+Every constructed plan must have total 10–60 seconds, strict positive excerpt durations, original order, disjoint retained word ranges, source-window membership, and only full-source-safe exact endpoints. Apply the existing duration arithmetic/tolerance consistently. Do not impose a 10-second minimum on each excerpt: the contract applies it to the delivered total. Deduplicate identical timestamp plans. Actual retained gaps distinguish multicuts; splitting adjacent speech just to count three cuts is not useful coverage.
+
+This is at most 24N raw proposals: eight continuous, eight two-cut and eight three-cut per start. Sorted safe endpoints and successor-start lookups give O(W log W + N log N), with a constant number of binary searches per template. Do not enumerate all pair/triple combinations or search unboundedly for better downstream starts.
+
+**Known coverage loss:** fixed duration allocations and local/spread omission positions miss unequal excerpts, arbitrary distant joins, and many complete endings. They can leave no multicuts on a source with long sentences even where other valid multicuts exist. This preserves genuine 1/2/3-cut options, not exhaustive access to every original plan. The provider must reject templates that delete setup or qualifications. These templates are an intentionally limited first implementation policy, not editorial intelligence.
+
+## Hard payload ceiling and its cost
+
+Linear is not necessarily small: the existing transcript guard permits 12,000 words; 24N could still produce 288,000 proposals. Do not send all proposals. Proposed fixed ceiling: **384 offered plans**, reserved as 128 per cut count in Auto, and 384 continuous plans in Continuous. Use a deterministic, evenly spaced sample from each deduplicated category sorted by start row, duration band and ending rows. Unused categories need not be filled with invented plans. Keep broad source coverage; never take only the first 384 plans. This cap is a product tradeoff, not a claim that 384 has proven optimal quality.
+
+Represent a plan once as `[id, [[firstRow,lastRow], ...], durationSeconds]`; retain its exact numeric segment object only in the local request map. IDs can be short ordinal strings. Provider source rows appear once, not once per overlapping candidate. Maximum offered row-range references: 1,152 (actual Auto quota maximum 768), plus 384 durations and IDs. Raw construction is linear in input with the above constant; temporary proposals may be O(N), final payload O(W+384). Log candidate counts by cut count, encoded payload bytes and known selected duration with existing diagnostics, not source text.
+
+Sampling can remove the better v7 span; do not special-case its timestamp to retain it. Record whether it survives before adoption. A useful independent acceptance condition is acceptable coverage on several fixture sources, including delayed corrections and unequal multicuts. If this modest coverage is unacceptable, the honest decision is to revise/authorize the candidate policy, not describe a sampled menu as arbitrary Auto selection. Verify actual SDK schema serialization and supported enum limits before shipping; no claim of provider acceptance or exact token savings has been tested here.
+
+Avoid accidentally making preparation quadratic: calling `prepareShortVideoSelection` for every proposal repeatedly scans W words. Precompute exact first-start and last-end word indices, safe endpoint membership, successor rows, and prefix maximum word end once. For each of at most three cuts verify selected word-index order and containment using those indexes. Check boundary duplicates/zero-duration words against existing validator semantics. Run the existing full validator **once on the resolved provider selection** as defense in depth. Property tests should compare every offered plan against the authoritative validator on small adversarial fixtures; they catch disagreement without imposing its scan cost on production construction.
+
+## Provider boundary and contracts
+
+Use a single required field `{ "selection": "P001" }` with an enum of request-local IDs plus `insufficient_source` and currently permitted `unsupported_focus` / `source_window_conflict` sentinels. One discriminator avoids an independent status/ID mismatch. Empty candidate sets short-circuit locally with the existing appropriate error; never create an empty enum. Unknown IDs, extra keys, malformed values and stale-map IDs fail closed.
+
+The resolver maps a known ID to `{status:'ok',segments:[...]}`, then calls existing provider preparation using the **full original transcript**, current boundary table, and controls. Sentinel results preserve current error codes, retryability and usage accounting. Change provider instructions/status handling alongside the schema: current generic `result.output.status` handling must not run blindly against the new video response. Other formats keep their existing schema and validation.
+
+The model sees the full sentence table, bounded plan menu, source-window metadata and requested focus. Replace endpoint-copying instructions with selecting exactly one complete plan; it may not combine IDs or edit ranges. Preserve instructions to read later corrections, necessary qualifiers and omitted gaps. Prefer one cut only when adequate. Duration preference remains soft 15/30/45/60; no exact-duration requirement, padding, truncation, or forced multicuts. Explain `insufficient_source` as no suitable **offered** selection, avoiding a false source-wide impossibility claim. Keep existing public error code; use accurate video-specific wording where this path constructs the error.
+
+Avoid duplicating `correction_context: transcript.text` for video when its full sentence table already includes all text; leave other formats' behavior unchanged. Full context matters more than saving this last duplication if the payload implementation accidentally filters rows. Bump the video prompt version. Keep the provider call budget at one, with no semantic judge, correction pass or retry. No changes to public API types, persisted timestamp content, saved legacy normalization, renderer, Clean/Off captions, original-audio behavior or export contracts are required.
+
+## Focused verification before any live evaluation
+
+- Builder invariants: offered plans contain each feasible template cut count; Continuous contains only one; every offered plan passes existing validation; total durations at 10/60 boundaries; no per-cut minimum; source-window and outside-window overlap guards; duplicate and zero-length word timings; incomplete final sentence and null internal endpoints.
+- Complexity/payload: synthetic 12,000-word source stays under 24N raw proposals and 384 offered plans; bounded lookup count, deterministic enumeration, no repeated transcript prose, no starvation of later source regions or feasible multi-cut categories.
+- Provider mock: ID round-trip preserves exact float endpoints, sentinel/error mapping, malformed/unknown ID rejection, full correction context outside the window, soft duration instructions, and exactly one request on semantic refusal/invalid result. Public and legacy timestamp plans still pass their existing tests.
+- Coverage counterexamples: verify that fixed omission templates miss a deliberate off-template distant or unequal valid plan, and that cap sampling can omit valid plans. Tests must document limitations, not quietly assert completeness.
+- Actual artifact regression: uncapped continuous menu includes the better contextual span and also the defective v7 span; 204.47–264.895 is never offered. Record capped retention separately. Presence of a stronger option is not proof the model will select it.
+- Run focused provider, boundary, video-plan, video-controls and video renderer/caption tests plus typecheck. Existing renderer tests should suffice unless canonical output mapping changes; do not create a new rendering subsystem or media test matrix for an internal representation change.
+
+## Rejected shortcuts
+
+Continuous-only Auto silently removes meaningful capability. Returning up to three independently valid passage IDs reintroduces summed-duration and ordering failures. Adding a duration field or prompt arithmetic does not constrain the relation. Punctuation or pronoun filters cannot guarantee discourse completeness. Postselection snapping/trimming changes the chosen thought. A plan ID fixes structural selection reliability only; finished-output quality remains unproven until separately authorized actual-output evaluation.

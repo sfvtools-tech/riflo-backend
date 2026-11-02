@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+# Called only through sudo. No caller-selected executable or namespace.
+exec /usr/sbin/ip netns exec riflo-source /usr/bin/setpriv --reuid=riflo --regid=riflo --clear-groups --no-new-privs /opt/riflo-tools/bin/yt-dlp --force-ipv6 "$@"
