@@ -5,9 +5,10 @@ apt-get update
 apt-get install -y ca-certificates curl gnupg ffmpeg fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-cjk nginx python3-venv python3-pip iptables sudo
 install -d -m 0755 /etc/apt/keyrings
 curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
-printf '%s\n' 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main' > /etc/apt/sources.list.d/nodesource.list
+printf '%s\n' 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main' > /etc/apt/sources.list.d/nodesource.list
 apt-get update
-apt-get install -y nodejs
+apt-get install -y nodejs=24.22.2-1nodesource1
+apt-mark hold nodejs
 python3 -m venv /opt/certbot
 /opt/certbot/bin/pip install 'certbot>=5.4,<6'
 id riflo || useradd --system --create-home --home-dir /var/lib/riflo --shell /usr/sbin/nologin riflo

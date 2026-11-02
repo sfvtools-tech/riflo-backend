@@ -29,3 +29,5 @@ TEMP_*.md
 *.key
 __pycache__/
 *.py[cod]
+
+gha-creds-*.json

@@ -137,7 +137,7 @@ Drive requests keep their existing `{fileId, resourceKey?}` shape and idempotenc
 
 ## YouTube imports
 
-The adapter is tested with Homebrew `yt-dlp` 2026.08.19, its bundled `yt-dlp-ejs` 0.8.0, Node 22 or newer and FFmpeg 9.0.2. YouTube requires FFmpeg HTTP options `request_size`, `multiple_requests` and `short_seek_size`; offline startup verification checks these capabilities in addition to the pinned yt-dlp version, production options and Node/FFmpeg executables. Tool paths must be absolute. Keep the matching EJS package bundled with yt-dlp; remote component downloads are disabled. A missing runtime, solver or HTTP capability is a setup error. No API key or user cookies are used.
+The adapter pins `yt-dlp` 2026.10.26 and `yt-dlp-ejs` 0.8.0, with Node 24.12 or newer and FFmpeg 9.0.2. YouTube requires FFmpeg HTTP options `request_size`, `multiple_requests` and `short_seek_size`; offline startup verification checks these capabilities in addition to the pinned yt-dlp version, production options and Node/FFmpeg executables. Tool paths must be absolute. Keep the matching EJS package bundled with yt-dlp; remote component downloads are disabled. A missing runtime, solver or HTTP capability is a setup error. No API key or user cookies are used.
 
 Set optional `YT_DLP_PATH` to the absolute yt-dlp executable and provide `FFMPEG_PATH`; Node uses the current backend executable. Both API and worker check these tools offline before starting when YouTube is configured. Leave `YT_DLP_PATH` unset to disable YouTube without affecting Drive. A configured but missing or untested executable stops startup with a setup error. No runtime package installation happens.
 

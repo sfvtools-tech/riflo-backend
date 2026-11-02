@@ -1,0 +1,124 @@
+name: Backend CI and deploy
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    name: Backend checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      SHARP_IGNORE_GLOBAL_LIBVIPS: '1'
+      FFMPEG_PATH: /usr/local/bin/ffmpeg
+      FFPROBE_PATH: /usr/local/bin/ffprobe
+      YT_DLP_PATH: /opt/riflo-tools/bin/yt-dlp
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.22.2'
+          cache: npm
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv fonts-noto-core fonts-noto-cjk
+          sudo bash deploy/cloud/install-media-tools.sh
+          npm install --global firebase-tools@15.34.2
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Full emulator and native tests (zero skips)
+        run: |
+          firebase emulators:exec --project demo-riflo --only auth,firestore,storage 'bash deploy/ci-test.sh'
+          bash deploy/test-activate-release.sh
+          python3 deploy/test-deploy-release.py
+          python3 deploy/cloud/test-caption-fonts.py
+      - run: npm run build
+      - name: Verify multilingual font coverage and real caption rendering
+        run: |
+          manifest=$(mktemp)
+          trap 'rm -f "$manifest"' EXIT
+          dpkg-query -W '-f=${Package}\t${Version}\n' fonts-noto-core fonts-noto-cjk > "$manifest"
+          python3 deploy/cloud/check-caption-fonts.py "$manifest"
+          node deploy/cloud/check-caption-render.mjs "$PWD"
+      - name: Package production release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          npm prune --omit=dev
+          node --input-type=module -e 'import sharp from "sharp"; await sharp({create:{width:1,height:1,channels:4,background:"white"}}).png().toBuffer()'
+          printf '%s\n' "$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" > RELEASE
+          mkdir -p artifact
+          tar -czf artifact/release.tar.gz dist node_modules package.json package-lock.json RELEASE
+          (cd artifact && sha256sum release.tar.gz > release.sha256)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          name: backend-release
+          path: |
+            artifact/release.tar.gz
+            artifact/release.sha256
+          if-no-files-found: error
+          retention-days: 1
+  deploy:
+    name: Deploy backend
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    concurrency:
+      group: backend-production-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CLOUDSDK_CORE_PROJECT: ${{ vars.GCP_PROJECT_ID }}
+      INSTANCE: ${{ vars.GCP_INSTANCE }}
+      ZONE: ${{ vars.GCP_ZONE }}
+    steps:
+      - name: Skip superseded commits
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          if [[ "$head" == "$GITHUB_SHA" ]]; then echo 'deploy=true' >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: steps.current.outputs.deploy == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: steps.current.outputs.deploy == 'true'
+        with:
+          name: backend-release
+          path: artifact
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        if: steps.current.outputs.deploy == 'true'
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+        if: steps.current.outputs.deploy == 'true'
+      - name: Upload and activate verified release
+        if: steps.current.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${CLOUDSDK_CORE_PROJECT:?}" "${INSTANCE:?}" "${ZONE:?}"
+          [[ "$INSTANCE" =~ ^[a-z][a-z0-9-]+$ && "$ZONE" =~ ^[a-z0-9-]+$ ]]
+          (cd artifact && sha256sum -c release.sha256)
+          release="$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          checksum=$(cut -d ' ' -f 1 artifact/release.sha256)
+          [[ "$checksum" =~ ^[0-9a-f]{64}$ ]]
+          remote="riflo-$release.tar.gz"
+          gcloud compute scp artifact/release.tar.gz "$INSTANCE:~/$remote" --zone "$ZONE" --tunnel-through-iap --ssh-key-expire-after=10m --quiet
+          gcloud compute ssh "$INSTANCE" --zone "$ZONE" --tunnel-through-iap --ssh-key-expire-after=10m --quiet --command "sudo /usr/local/sbin/riflo-deploy-release '$release' '$checksum' < \"\$HOME/$remote\"; result=\$?; rm -f -- \"\$HOME/$remote\"; exit \$result"

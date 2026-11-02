@@ -27,7 +27,7 @@ test('exact origin preflight, errors and stream headers preserve bearer authenti
       assert.equal(response.status, 403);
       assert.equal(response.headers.get('access-control-allow-origin'), null);
     }
-    for (const headers of [{ 'Access-Control-Request-Method': 'PATCH' }, { 'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'X-Evil' }]) {
+    for (const headers of [{ 'Access-Control-Request-Method': 'PATCH' }, { 'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'X-Evil' }] as Record<string, string>[]) {
       assert.equal((await fetch(url, { method: 'OPTIONS', headers: { Origin: origin, ...headers } })).status, 403);
     }
     assert.equal(calls, 0);
