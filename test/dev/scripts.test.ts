@@ -19,7 +19,7 @@ for (const scenario of ['SIGINT', 'api', 'worker', 'clean-exit', 'stubborn'] as 
     await symlink(new URL('node_modules', root), join(cwd, 'node_modules'), 'dir');
     await writeFile(join(cwd, 'package.json'), JSON.stringify({
       private: true,
-      scripts: { dev: scripts.dev, 'dev:api': 'node fixture.cjs api', 'dev:worker': 'node fixture.cjs worker' },
+      scripts: { dev: scripts.dev.replace(scripts['dev:api'], 'node fixture.cjs api').replace(scripts['dev:worker'], 'node fixture.cjs worker') },
     }));
     await writeFile(join(cwd, 'fixture.cjs'), `
       const { existsSync } = require('node:fs');
@@ -51,7 +51,7 @@ for (const scenario of ['SIGINT', 'api', 'worker', 'clean-exit', 'stubborn'] as 
         await delay(25);
       }
       pids.push(...[...output.matchAll(/READY (?:api|worker) (\d+)/g)].map((match) => Number(match[1])));
-      if (scenario === 'SIGINT') child.kill('SIGINT');
+      if (scenario === 'SIGINT') process.kill(-child.pid!, 'SIGINT');
       else await writeFile(join(cwd, `exit-${scenario === 'clean-exit' || scenario === 'stubborn' ? 'api' : scenario}`), '');
       const shutdownDeadline = Date.now() + 8_000;
       while (!finished) {
@@ -90,7 +90,7 @@ test('dev watchers reload imported code, inherit trace flags, release ports and 
     private: true,
     type: 'module',
     scripts: {
-      dev: scripts.dev,
+      dev: scripts.dev.replace('src/server.ts', 'api.ts').replace('src/worker.ts', 'worker.ts'),
       'dev:api': scripts['dev:api'].replace('src/server.ts', 'api.ts'),
       'dev:worker': scripts['dev:worker'].replace('src/worker.ts', 'worker.ts'),
     },
@@ -134,11 +134,12 @@ test('dev watchers reload imported code, inherit trace flags, release ports and 
       return entry;
     }));
   };
-  const waitFor = async (condition: () => boolean) => {
+  const waitFor = async (condition: () => boolean, onWaiting?: () => Promise<void>) => {
     const deadline = Date.now() + 12_000;
     while (!condition()) {
       assert.ok(Date.now() < deadline, output);
-      await delay(25);
+      await onWaiting?.();
+      await delay(onWaiting ? 250 : 25);
       refreshEntries();
     }
   };
@@ -146,8 +147,10 @@ test('dev watchers reload imported code, inherit trace flags, release ports and 
     await waitFor(() => entries.length === 2);
     const firstApi = entries.find((entry) => entry.name === 'api')!;
     const firstWorker = entries.find((entry) => entry.name === 'worker')!;
-    await writeFile(join(cwd, 'api-version.ts'), 'export const version: number = 2;\n');
-    await waitFor(() => entries.some((entry) => entry.name === 'api' && entry.version === 2));
+    // tsx registers imported-file watchers asynchronously after the child starts.
+    // Observe a real reload rather than treating child READY as watcher readiness.
+    await waitFor(() => entries.some((entry) => entry.name === 'api' && entry.version === 2),
+      () => writeFile(join(cwd, 'api-version.ts'), 'export const version: number = 2;\n'));
     assert.equal(entries.filter((entry) => entry.name === 'worker').length, 1, output);
     assert.throws(() => process.kill(firstApi.pid, 0), { code: 'ESRCH' });
     await writeFile(join(cwd, 'stubborn-worker'), '');
@@ -155,7 +158,7 @@ test('dev watchers reload imported code, inherit trace flags, release ports and 
     await waitFor(() => entries.some((entry) => entry.name === 'worker' && entry.version === 2));
     assert.throws(() => process.kill(firstWorker.pid, 0), { code: 'ESRCH' });
     await rm(join(cwd, 'stubborn-worker'));
-    child.kill('SIGINT');
+    process.kill(-child.pid!, 'SIGINT');
     await waitFor(() => exited);
     for (const { pid } of entries) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, output);
     await new Promise<void>((resolve, reject) => portProbe.once('error', reject).listen(port, '127.0.0.1', () => portProbe.close(() => resolve())));
