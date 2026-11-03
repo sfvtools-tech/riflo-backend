@@ -4,9 +4,9 @@ set -euo pipefail
 stage=$(mktemp -d)
 stage=$(cd "$stage" && pwd -P)
 trap 'rm -rf -- "$stage"' EXIT
-mkdir -p "$stage/cloud" "$stage/bin" "$stage/root/releases"
+mkdir -p "$stage/cloud" "$stage/bin" "$stage/root/releases" "$stage/etc/.config-test"
 export TEST_ROOT="$stage/root" TEST_LOG="$stage/log"
-sed -e "s|root=/opt/riflo|root=$TEST_ROOT|" -e 's/\[\[ $EUID == 0 \]\]/true/' "$(dirname "$0")/activate-release.sh" > "$stage/activate.sh"
+sed -e "s|root=/opt/riflo|root=$TEST_ROOT|" -e "s|/etc/riflo|$stage/etc|g" -e 's/\[\[ $EUID == 0 \]\]/true/' "$(dirname "$0")/activate-release.sh" > "$stage/activate.sh"
 cat > "$stage/bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TEST_LOG"
@@ -49,6 +49,15 @@ cat > "$stage/bin/sleep" <<'STUB'
 #!/usr/bin/env bash
 exit 0
 STUB
+cat > "$stage/bin/stat" <<'STUB'
+#!/usr/bin/env bash
+printf '0:600\n'
+STUB
+cat > "$stage/bin/install" <<'STUB'
+#!/usr/bin/env python3
+import shutil, sys
+shutil.copyfile(sys.argv[-2], sys.argv[-1])
+STUB
 chmod +x "$stage/bin/"*
 export PATH="$stage/bin:$PATH"
 for release in old new; do
@@ -90,6 +99,23 @@ bash "$stage/activate.sh" new >/dev/null
 [[ $(readlink "$TEST_ROOT/previous") == "$TEST_ROOT/releases/old" ]]
 bash "$stage/activate.sh" old >/dev/null
 [[ $(readlink "$TEST_ROOT/current") == "$TEST_ROOT/releases/old" ]]
+# Failed activation restores code and the exact previous environment together.
+printf 'TOKEN=old\n' > "$stage/etc/runtime.env"
+printf 'TOKEN=new\n' > "$stage/etc/.config-test/runtime.env"
+FAIL_START=yes bash "$stage/activate.sh" new "$stage/etc/.config-test/runtime.env" >/dev/null 2>&1 && exit 1
+[[ $(readlink "$TEST_ROOT/current") == "$TEST_ROOT/releases/old" ]]
+[[ $(cat "$stage/etc/runtime.env") == TOKEN=old ]]
+[[ $(cat "$stage/etc/runtime.env.previous") == TOKEN=old ]]
+# Applying settings to the current release restarts it without changing its identity.
+bash "$stage/activate.sh" old "$stage/etc/.config-test/runtime.env" >/dev/null
+[[ $(readlink "$TEST_ROOT/current") == "$TEST_ROOT/releases/old" ]]
+[[ $(cat "$stage/etc/runtime.env") == TOKEN=new ]]
+# A rollback between config validation and activation must not reactivate old code.
+count=$(wc -l < "$TEST_LOG")
+if bash "$stage/activate.sh" new "$stage/etc/.config-test/runtime.env" --current-only >/dev/null 2>&1; then exit 1; fi
+[[ $(readlink "$TEST_ROOT/current") == "$TEST_ROOT/releases/old" ]]
+[[ $(wc -l < "$TEST_LOG") == "$count" ]]
+[[ $(cat "$stage/etc/runtime.env") == TOKEN=new ]]
 # Unsafe current target is rejected before any service command.
 rm "$TEST_ROOT/current"
 ln -s /tmp "$TEST_ROOT/current"
