@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateProductionConfig } from '../src/validate-production-config.js';
+import { validateProductionConfig } from '../../src/validate-production-config.js';
 
 const environment = {
   NODE_ENV: 'production', FIREBASE_PROJECT_ID: 'riflo-test', FIREBASE_STORAGE_BUCKET: 'riflo-test.firebasestorage.app',
