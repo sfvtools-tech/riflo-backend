@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createReadStream } from 'node:fs';
+import { createReadStream, watch } from 'node:fs';
+import { Readable } from 'node:stream';
 import { mkdtemp, readFile, writeFile, access, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -17,6 +18,45 @@ import { resolveGenerationControls } from '../../src/generation/controls.js';
 const execute = promisify(execFile);
 const transcript = { text: 'A useful source idea.', words: [{ text: 'A', start: 1, end: 2 }, { text: 'useful', start: 2, end: 3 }, { text: 'idea', start: 10, end: 11 }] };
 const plan = { status: 'ok' as const, startSeconds: 1, endSeconds: 11 };
+
+test('cancelled rendering waits for an encoder that ignores SIGTERM to exit before removing scratch', { timeout: 10_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'riflo-video-abort-'));
+  const marker = join(directory, 'ready.json');
+  const encoder = join(directory, 'encoder');
+  const controller = new AbortController();
+  let pid: number | undefined;
+  let watcher: ReturnType<typeof watch> | undefined;
+  let rendering: Promise<unknown> | undefined;
+  try {
+    await writeFile(encoder, `#!${process.execPath}\nconst fs = require('node:fs');\nprocess.on('SIGTERM', () => {});\nsetInterval(() => {}, 1000);\nfs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ pid: process.pid, output: process.argv.at(-1) }));\n`, { mode: 0o700 });
+    const ready = new Promise<{ pid: number; output: string }>((resolve, reject) => {
+      watcher = watch(directory, () => {
+        void readFile(marker, 'utf8').then(text => {
+          try { resolve(JSON.parse(text)); } catch { /* The write may still be in progress. */ }
+        }).catch(() => undefined);
+      });
+      watcher.on('error', reject);
+    });
+    const render = createVideoRenderer({
+      ffmpegPath: encoder, ffprobePath: encoder, readSource: () => Readable.from(['source']),
+      storage: { uploadFile: async () => assert.fail('Cancelled encoder cannot upload'), remove: async () => assert.fail('No upload started') },
+    });
+    rendering = render(plan, { project: { uid: 'alice', id: 'abort', storagePath: 'source', source: { durationSeconds: 12 } }, slot: { id: 'clip' }, attempt: 1 } as GenerationClaim, transcript, controller.signal);
+    const rejected = assert.rejects(rendering, { code: 'video_render_failed', retryable: true });
+    const started = await ready;
+    pid = started.pid;
+    controller.abort();
+    await rejected;
+    assert.throws(() => process.kill(pid!, 0), { code: 'ESRCH' });
+    await assert.rejects(access(dirname(started.output)), { code: 'ENOENT' });
+  } finally {
+    watcher?.close();
+    controller.abort();
+    if (pid) { try { process.kill(pid, 'SIGKILL'); } catch { /* Already exited. */ } }
+    await rendering?.catch(() => undefined);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('clip plans use real word boundaries and bounded finite ordered source times', () => {
   assert.deepEqual(validateShortVideo(plan, transcript, 12).content, { status: 'ok', segments: [{ startSeconds: 1, endSeconds: 11 }] });
