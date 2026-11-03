@@ -37,7 +37,6 @@ trap 'rm -rf -- "$stage"' EXIT
 if [[ -n $candidate ]]; then
   [[ $candidate == /etc/riflo/.config-*/runtime.env && -f $candidate && ! -L $candidate && $(stat -c '%u:%a' "$candidate") == 0:600 ]] || { echo 'Invalid staged environment.' >&2; exit 1; }
   cp -p -- "$runtime" "$stage/previous.env"
-  install -o root -g riflo -m0640 "$stage/previous.env" "$runtime.previous"
 fi
 link() {
   rm -f -- "$stage/link"

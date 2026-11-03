@@ -105,11 +105,12 @@ printf 'TOKEN=new\n' > "$stage/etc/.config-test/runtime.env"
 FAIL_START=yes bash "$stage/activate.sh" new "$stage/etc/.config-test/runtime.env" >/dev/null 2>&1 && exit 1
 [[ $(readlink "$TEST_ROOT/current") == "$TEST_ROOT/releases/old" ]]
 [[ $(cat "$stage/etc/runtime.env") == TOKEN=old ]]
-[[ $(cat "$stage/etc/runtime.env.previous") == TOKEN=old ]]
+[[ ! -e $stage/etc/runtime.env.previous ]]
 # Applying settings to the current release restarts it without changing its identity.
 bash "$stage/activate.sh" old "$stage/etc/.config-test/runtime.env" >/dev/null
 [[ $(readlink "$TEST_ROOT/current") == "$TEST_ROOT/releases/old" ]]
 [[ $(cat "$stage/etc/runtime.env") == TOKEN=new ]]
+[[ ! -e $stage/etc/runtime.env.previous ]]
 # A rollback between config validation and activation must not reactivate old code.
 count=$(wc -l < "$TEST_LOG")
 if bash "$stage/activate.sh" new "$stage/etc/.config-test/runtime.env" --current-only >/dev/null 2>&1; then exit 1; fi

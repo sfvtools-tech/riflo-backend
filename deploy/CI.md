@@ -57,7 +57,7 @@ The workflow also forwards existing model-rate, media-limit, source-validation, 
 
 For a code change, update the relevant GitHub settings before merging; the normal main deployment applies them with the code. For configuration alone, update settings and run **Actions → Backend CI and deploy → Run workflow → main → Apply configuration**. It uses the same production lock and health checks. Frontend public settings require a separate frontend rebuild. GitHub does not atomically snapshot edits across several settings: finish the settings edit before starting deployment.
 
-The runner creates a private temporary payload, transfers it over IAP/SSH, then removes local and remote copies. Configuration values must be single-line strings; newlines, NULs and oversized values are rejected without printing their contents. The VM retains one protected previous environment file for failed-activation recovery. Reinstall the reviewed root-owned helpers before the first deployment of this workflow, and extend each exact-workflow WIF condition to permit main `workflow_dispatch` as well as `push`.
+The runner creates a private temporary payload, transfers it over IAP/SSH, then removes local and remote copies. Configuration values must be single-line strings; newlines, NULs and oversized values are rejected without printing their contents. During activation, a protected temporary copy of the previous environment supports rollback and is removed when activation finishes. Reinstall the reviewed root-owned helpers before the first deployment of this workflow, and extend each exact-workflow WIF condition to permit main `workflow_dispatch` as well as `push`.
 
 ## First configuration-delivery deployment
 
