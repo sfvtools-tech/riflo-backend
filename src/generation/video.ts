@@ -7,7 +7,7 @@ import { createWriteStream } from 'node:fs';
 import { mkdtemp, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, type ExecFileOptions } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -17,7 +17,17 @@ import { shortVideoDuration, validateShortVideo } from './validation.js';
 import { GenerationError, type GenerationClaim, type LegacyShortVideoContent, type OutputAsset, type ShortVideoContent, type Transcript } from './service.js';
 import { traceWorkerAwait, workerTrace } from '../worker-trace.js';
 
-const execute = promisify(execFile);
+const executeFile = promisify(execFile);
+async function execute(file: string, args: string[], options: ExecFileOptions) {
+  const execution = executeFile(file, args, { ...options, encoding: 'utf8' });
+  const closed = new Promise<void>(resolve => execution.child.once('close', () => resolve()));
+  try { return await execution; }
+  catch (error) {
+    // Abort can reject before exit, and execFile may send SIGTERM on this path.
+    try { execution.child.kill('SIGKILL'); } catch { /* Preserve the original process failure. */ }
+    throw error;
+  } finally { await closed; }
+}
 export type VideoStorage = { uploadFile: (path: string, localPath: string, signal: AbortSignal) => Promise<void>; remove: (path: string) => Promise<void> };
 
 export function createVideoRenderer({ storage, readSource, ffmpegPath, ffprobePath }: {

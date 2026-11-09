@@ -4,11 +4,18 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      action:
+        description: Apply configuration to the currently deployed backend
+        type: choice
+        options: [Apply configuration]
+        default: Apply configuration
 permissions:
   contents: read
 jobs:
   check:
     name: Backend checks
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
@@ -44,6 +51,8 @@ jobs:
           firebase emulators:exec --project demo-riflo --only auth,firestore,storage 'bash deploy/ci-test.sh'
           bash deploy/test-activate-release.sh
           python3 deploy/test-deploy-release.py
+          python3 deploy/test-runtime-payload.py
+          sudo python3 deploy/test-systemd-environment.py
           python3 deploy/cloud/test-caption-fonts.py
       - run: npm run build
       - name: Verify multilingual font coverage and real caption rendering
@@ -74,7 +83,10 @@ jobs:
   deploy:
     name: Deploy backend
     needs: check
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      always() && github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'push' && needs.check.result == 'success') ||
+       github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     concurrency:
@@ -100,7 +112,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: steps.current.outputs.deploy == 'true'
+        if: steps.current.outputs.deploy == 'true' && github.event_name == 'push'
         with:
           name: backend-release
           path: artifact
@@ -111,17 +123,79 @@ jobs:
           service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
         if: steps.current.outputs.deploy == 'true'
-      - name: Upload and activate verified release
+      - name: Apply production code and configuration
         if: steps.current.outputs.deploy == 'true'
         shell: bash
+        env:
+          RIFLO_CONFIG_FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
+          RIFLO_CONFIG_FIREBASE_STORAGE_BUCKET: ${{ vars.FIREBASE_STORAGE_BUCKET }}
+          RIFLO_CONFIG_CORS_ALLOWED_ORIGINS: ${{ vars.CORS_ALLOWED_ORIGINS }}
+          RIFLO_CONFIG_ANTHROPIC_TEXT_MODEL: ${{ vars.ANTHROPIC_TEXT_MODEL }}
+          RIFLO_CONFIG_ANTHROPIC_VIDEO_MODEL: ${{ vars.ANTHROPIC_VIDEO_MODEL }}
+          RIFLO_CONFIG_ANTHROPIC_NEWSLETTER_MODEL: ${{ vars.ANTHROPIC_NEWSLETTER_MODEL }}
+          RIFLO_CONFIG_DEEPGRAM_MODEL: ${{ vars.DEEPGRAM_MODEL }}
+          RIFLO_CONFIG_DEEPGRAM_LANGUAGE: ${{ vars.DEEPGRAM_LANGUAGE }}
+          RIFLO_CONFIG_GENERATION_MAX_OUTPUT_TOKENS: ${{ vars.GENERATION_MAX_OUTPUT_TOKENS }}
+          RIFLO_CONFIG_GENERATION_LONG_FORM_MAX_OUTPUT_TOKENS: ${{ vars.GENERATION_LONG_FORM_MAX_OUTPUT_TOKENS }}
+          RIFLO_CONFIG_GENERATION_STAGE_TIMEOUT_MS: ${{ vars.GENERATION_STAGE_TIMEOUT_MS }}
+          RIFLO_CONFIG_TRIAL_ENABLED: ${{ vars.TRIAL_ENABLED }}
+          RIFLO_CONFIG_RETENTION_ENABLED: ${{ vars.RETENTION_ENABLED }}
+          RIFLO_CONFIG_GOOGLE_DRIVE_CLIENT_ID: ${{ vars.GOOGLE_DRIVE_CLIENT_ID }}
+          RIFLO_CONFIG_GOOGLE_DRIVE_REDIRECT_URI: ${{ vars.GOOGLE_DRIVE_REDIRECT_URI }}
+          RIFLO_CONFIG_DEEPGRAM_MICROS_PER_MINUTE: ${{ vars.DEEPGRAM_MICROS_PER_MINUTE }}
+          RIFLO_CONFIG_RIFLO_MEDIA_MAX_DIMENSION: ${{ vars.RIFLO_MEDIA_MAX_DIMENSION }}
+          RIFLO_CONFIG_RIFLO_MEDIA_MAX_PIXELS: ${{ vars.RIFLO_MEDIA_MAX_PIXELS }}
+          RIFLO_CONFIG_RIFLO_MEDIA_MAX_FPS: ${{ vars.RIFLO_MEDIA_MAX_FPS }}
+          RIFLO_CONFIG_RIFLO_MEDIA_MAX_STREAMS: ${{ vars.RIFLO_MEDIA_MAX_STREAMS }}
+          RIFLO_CONFIG_SOURCE_VALIDATION_MAX_ACTIVE: ${{ vars.SOURCE_VALIDATION_MAX_ACTIVE }}
+          RIFLO_CONFIG_SOURCE_VALIDATION_MAX_PER_ACCOUNT: ${{ vars.SOURCE_VALIDATION_MAX_PER_ACCOUNT }}
+          RIFLO_CONFIG_STREAM_MAX_MILLISECONDS: ${{ vars.STREAM_MAX_MILLISECONDS }}
+          RIFLO_CONFIG_STREAM_MAX_ACTIVE: ${{ vars.STREAM_MAX_ACTIVE }}
+          RIFLO_CONFIG_STREAM_MAX_PER_ACCOUNT: ${{ vars.STREAM_MAX_PER_ACCOUNT }}
+          RIFLO_CONFIG_RIFLO_WORKER_TRACE: ${{ vars.RIFLO_WORKER_TRACE }}
+          RIFLO_CONFIG_ANTHROPIC_INPUT_MICROS_PER_MILLION: ${{ vars.ANTHROPIC_INPUT_MICROS_PER_MILLION }}
+          RIFLO_CONFIG_ANTHROPIC_OUTPUT_MICROS_PER_MILLION: ${{ vars.ANTHROPIC_OUTPUT_MICROS_PER_MILLION }}
+          RIFLO_CONFIG_ANTHROPIC_CACHE_READ_MICROS_PER_MILLION: ${{ vars.ANTHROPIC_CACHE_READ_MICROS_PER_MILLION }}
+          RIFLO_CONFIG_ANTHROPIC_CACHE_WRITE_MICROS_PER_MILLION: ${{ vars.ANTHROPIC_CACHE_WRITE_MICROS_PER_MILLION }}
+          RIFLO_CONFIG_ANTHROPIC_VIDEO_INPUT_MICROS_PER_MILLION: ${{ vars.ANTHROPIC_VIDEO_INPUT_MICROS_PER_MILLION }}
+          RIFLO_CONFIG_ANTHROPIC_VIDEO_OUTPUT_MICROS_PER_MILLION: ${{ vars.ANTHROPIC_VIDEO_OUTPUT_MICROS_PER_MILLION }}
+          RIFLO_CONFIG_ANTHROPIC_VIDEO_CACHE_READ_MICROS_PER_MILLION: ${{ vars.ANTHROPIC_VIDEO_CACHE_READ_MICROS_PER_MILLION }}
+          RIFLO_CONFIG_ANTHROPIC_VIDEO_CACHE_WRITE_MICROS_PER_MILLION: ${{ vars.ANTHROPIC_VIDEO_CACHE_WRITE_MICROS_PER_MILLION }}
+          RIFLO_CONFIG_ANTHROPIC_NEWSLETTER_INPUT_MICROS_PER_MILLION: ${{ vars.ANTHROPIC_NEWSLETTER_INPUT_MICROS_PER_MILLION }}
+          RIFLO_CONFIG_ANTHROPIC_NEWSLETTER_OUTPUT_MICROS_PER_MILLION: ${{ vars.ANTHROPIC_NEWSLETTER_OUTPUT_MICROS_PER_MILLION }}
+          RIFLO_CONFIG_ANTHROPIC_NEWSLETTER_CACHE_READ_MICROS_PER_MILLION: ${{ vars.ANTHROPIC_NEWSLETTER_CACHE_READ_MICROS_PER_MILLION }}
+          RIFLO_CONFIG_ANTHROPIC_NEWSLETTER_CACHE_WRITE_MICROS_PER_MILLION: ${{ vars.ANTHROPIC_NEWSLETTER_CACHE_WRITE_MICROS_PER_MILLION }}
+          RIFLO_CONFIG_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RIFLO_CONFIG_DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          RIFLO_CONFIG_GOOGLE_DRIVE_CLIENT_SECRET: ${{ secrets.GOOGLE_DRIVE_CLIENT_SECRET }}
+          RIFLO_CONFIG_DRIVE_TOKEN_ENCRYPTION_KEY: ${{ secrets.DRIVE_TOKEN_ENCRYPTION_KEY }}
+          RIFLO_CONFIG_TRIAL_ABUSE_HMAC_KEY: ${{ secrets.TRIAL_ABUSE_HMAC_KEY }}
         run: |
           set -euo pipefail
+          umask 077
           : "${CLOUDSDK_CORE_PROJECT:?}" "${INSTANCE:?}" "${ZONE:?}"
           [[ "$INSTANCE" =~ ^[a-z][a-z0-9-]+$ && "$ZONE" =~ ^[a-z0-9-]+$ ]]
-          (cd artifact && sha256sum -c release.sha256)
-          release="$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          checksum=$(cut -d ' ' -f 1 artifact/release.sha256)
-          [[ "$checksum" =~ ^[0-9a-f]{64}$ ]]
-          remote="riflo-$release.tar.gz"
-          gcloud compute scp artifact/release.tar.gz "$INSTANCE:~/$remote" --zone "$ZONE" --tunnel-through-iap --ssh-key-expire-after=10m --quiet
-          gcloud compute ssh "$INSTANCE" --zone "$ZONE" --tunnel-through-iap --ssh-key-expire-after=10m --quiet --command "sudo /usr/local/sbin/riflo-deploy-release '$release' '$checksum' < \"\$HOME/$remote\"; result=\$?; rm -f -- \"\$HOME/$remote\"; exit \$result"
+          payload=$(mktemp)
+          remote="riflo-config-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.payload"
+          uploaded=false
+          cleanup() {
+            rm -f -- "$payload"
+            if [[ "$uploaded" == true ]]; then
+              gcloud compute ssh "$INSTANCE" --zone "$ZONE" --tunnel-through-iap --ssh-key-expire-after=10m --quiet --command "rm -f -- \"\$HOME/$remote\"" || true
+            fi
+          }
+          trap cleanup EXIT
+          python3 deploy/build-runtime-payload.py > "$payload"
+          command='sudo /usr/local/sbin/riflo-deploy-release --config'
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            (cd artifact && sha256sum -c release.sha256)
+            release=$(tar -xOzf artifact/release.tar.gz RELEASE)
+            checksum=$(cut -d ' ' -f 1 artifact/release.sha256)
+            [[ "$release" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ && "$checksum" =~ ^[0-9a-f]{64}$ ]]
+            [[ "$release" == "$GITHUB_SHA-$GITHUB_RUN_ID-"* ]]
+            cat artifact/release.tar.gz >> "$payload"
+            command="sudo /usr/local/sbin/riflo-deploy-release '$release' '$checksum'"
+          fi
+          uploaded=true
+          gcloud compute scp "$payload" "$INSTANCE:~/$remote" --zone "$ZONE" --tunnel-through-iap --ssh-key-expire-after=10m --quiet
+          gcloud compute ssh "$INSTANCE" --zone "$ZONE" --tunnel-through-iap --ssh-key-expire-after=10m --quiet --command "$command < \"\$HOME/$remote\"; result=\$?; rm -f -- \"\$HOME/$remote\"; exit \$result"
