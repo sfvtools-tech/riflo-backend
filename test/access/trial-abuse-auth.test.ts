@@ -36,7 +36,7 @@ test('actual Firebase Google claims bind trial across auth deletion/recreation a
   try {
     await writeFile(executable, `#!${process.execPath}\nconst fs=require('node:fs');fs.appendFileSync(${JSON.stringify(calls)},'call\\n');process.stdout.write(${JSON.stringify(JSON.stringify({ id: 'abcdefghijk', extractor_key: 'Youtube', title: 'Fixture', availability: 'public', live_status: 'not_live', age_limit: 0, duration: 30 }))});\n`);
     await chmod(executable, 0o700);
-    const dependencies = createFirebaseDependencies('demo-riflo', undefined, 'demo-riflo.appspot.com', undefined, { executable, nodePath: process.execPath, ffmpegPath: process.env.FFMPEG_PATH ?? '/opt/homebrew/bin/ffmpeg' }, true, true, key);
+    const dependencies = createFirebaseDependencies('demo-riflo', undefined, 'demo-riflo.appspot.com', undefined, { executable, nodePath: process.execPath, ffmpegPath: process.env.FFMPEG_PATH ?? '/opt/homebrew/bin/ffmpeg' }, true, key);
     let user = (await signInWithCredential(auth, credential)).user;
     uids.push(user.uid);
     let token = await user.getIdToken();
@@ -101,7 +101,7 @@ test('actual Firebase Google claims bind trial across auth deletion/recreation a
 
 test('production Firebase wiring with missing dedicated key fails new trial readiness before clock or providers', { skip: !process.env.FIRESTORE_EMULATOR_HOST }, async () => {
   const uid = `missing-trial-key-${randomUUID()}`;
-  const dependencies = createFirebaseDependencies('demo-riflo', undefined, 'demo-riflo.appspot.com', undefined, { executable: '/does-not-exist-controlled-provider', nodePath: process.execPath, ffmpegPath: '/does-not-exist-controlled-ffmpeg' }, true, true);
+  const dependencies = createFirebaseDependencies('demo-riflo', undefined, 'demo-riflo.appspot.com', undefined, { executable: '/does-not-exist-controlled-provider', nodePath: process.execPath, ffmpegPath: '/does-not-exist-controlled-ffmpeg' }, true);
   const identity: RequestIdentity = { uid, email_verified: true, firebase: { sign_in_provider: 'google.com', identities: { 'google.com': [randomUUID()] } } };
   const server = createServer(createHandler({ ...dependencies, verifyToken: async () => identity }));
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));

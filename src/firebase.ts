@@ -52,7 +52,7 @@ function createFirebaseSources(database: () => ReturnType<typeof getFirestore>, 
   });
 }
 
-export function createFirebaseDependencies(projectId: string, driveConfig?: DriveConfig, storageBucket?: string, generationConfig?: GenerationConfig, youtubeConfig?: YouTubeConfig, trialEnabled = false, retentionEnabled = false, trialAbuseKey?: Buffer): Dependencies {
+export function createFirebaseDependencies(projectId: string, driveConfig?: DriveConfig, storageBucket?: string, generationConfig?: GenerationConfig, youtubeConfig?: YouTubeConfig, trialEnabled = false, trialAbuseKey?: Buffer): Dependencies {
   let services: { auth: ReturnType<typeof getAuth>; db: ReturnType<typeof getFirestore> } | undefined;
 
   // Public health checks do not need credentials or a database connection.
@@ -118,7 +118,7 @@ export function createFirebaseDependencies(projectId: string, driveConfig?: Driv
           await createTrialAbuseStore(firebase().db, trialAbuseKey).prepare(identity ?? { uid }, Date.now(), true);
         },
         ...(trialEnabled ? { startTrial: async (uid, now, _input, identity) => {
-          const lifecycle = createLifecycleStore(firebase().db, { retentionEnabled });
+          const lifecycle = createLifecycleStore(firebase().db);
           const raw = await lifecycle.get(uid);
           // Legacy/manual and paid accounts never acquire an automatic trial.
           if (resolveAccess(raw, now).lifecycle?.trial.state === 'eligible') await lifecycle.startTrial(uid, now, trialSubjectKey(identity ?? { uid }, trialAbuseKey));

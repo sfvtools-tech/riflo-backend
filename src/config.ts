@@ -5,7 +5,6 @@ function readSwitch(env: Record<string, string | undefined>, name: string): bool
   return value === 'true';
 }
 export const readTrialConfig = (env: Record<string, string | undefined>) => readSwitch(env, 'TRIAL_ENABLED');
-export const readRetentionConfig = (env: Record<string, string | undefined>) => readSwitch(env, 'RETENTION_ENABLED');
 export function readTrialAbuseKey(env: Record<string, string | undefined>): Buffer | undefined {
   const value = env.TRIAL_ABUSE_HMAC_KEY;
   if (value === undefined) return undefined;

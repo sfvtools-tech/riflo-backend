@@ -152,7 +152,6 @@ test('upgrade preserves current grant corrections while adding the approved diff
   const lower = transitionLifecycle(undefined, paid(0), now + 1000);
   lower.paid!.grant.limits = { creationCredits: 125, sourceSeconds: 18123 };
   lower.paid!.grant.features = ['x_posts', 'blogs'];
-  lower.paid!.grant.sourceRetentionDays = 30;
   const higher = transitionLifecycle(lower, { type: 'upgrade', expectedRevision: lower.revision }, now + 1000);
   assert.deepEqual(higher.paid!.grant, {
     ...lower.paid!.grant, limits: { creationCredits: 255, sourceSeconds: 36123 },

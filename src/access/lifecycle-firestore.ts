@@ -10,7 +10,7 @@ function fingerprint(value: unknown): string {
   const sorted = (item: unknown): unknown => Array.isArray(item) ? item.map(sorted) : item && typeof item === 'object' ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, entry]) => [key, sorted(entry)])) : item;
   return createHash('sha256').update(JSON.stringify(sorted(value))).digest('hex');
 }
-export function createLifecycleStore(db: Firestore, { now = Date.now, retentionEnabled = false }: { now?: () => number; retentionEnabled?: boolean } = {}) {
+export function createLifecycleStore(db: Firestore, { now = Date.now }: { now?: () => number } = {}) {
   const ref = (uid: string) => db.collection('subscriptionGrants').doc(uid);
   return {
     async get(uid: string) { return (await ref(uid).get()).data() ?? null; },
@@ -28,7 +28,7 @@ export function createLifecycleStore(db: Firestore, { now = Date.now, retentionE
           transaction.create(claim, { version: 1, startedAt: now });
           transaction.create(binding, { version: 1, subjectKey });
         }
-        if (retentionEnabled && next !== saved && !next.retention) next = { ...next, retention: { version: 1, paidTenureId: null } };
+        if (next !== saved && !next.retention) next = { ...next, retention: { version: 1, paidTenureId: null } };
         if (next !== saved) transaction.set(ref(uid), next);
         return next;
       });
@@ -46,16 +46,15 @@ export function createLifecycleStore(db: Firestore, { now = Date.now, retentionE
         const saved = (await transaction.get(ref(uid))).data();
         const at = now();
         let next = transitionLifecycle(saved, command, at);
-        const manageRetention = retentionEnabled || isLifecycle(saved) && saved.retention !== undefined;
         let tenureWrite: PaidTenure | undefined;
-        if (manageRetention && next.paid && (command.type === 'activate_paid' || command.type === 'renew')) {
+        if (next.paid && (command.type === 'activate_paid' || command.type === 'renew')) {
           const existingId = isLifecycle(saved) ? saved.retention?.paidTenureId : undefined;
           const existingRef = existingId ? db.collection('accounts').doc(uid).collection('retentionTenures').doc(existingId) : undefined;
           const existing = existingRef ? (await transaction.get(existingRef)).data() : undefined;
           if (existingId && (!isPaidTenure(existing) || existing.uid !== uid || existing.id !== existingId)) throw new LifecycleError(409, 'lifecycle_conflict', 'Paid retention history is unavailable.');
           const survives = isPaidTenure(existing) && existing.paidAccessEndsAt + 60 * 86_400_000 > at;
           const id = survives ? existing.id : createId();
-          tenureWrite = { id, uid, startsAt: survives ? existing.startsAt : Date.parse(next.paid.grant.startsAt), ...(survives ? existing.activatedAt === undefined ? {} : { activatedAt: existing.activatedAt } : { activatedAt: at }), paidAccessEndsAt: Date.parse(next.paid.grant.expiresAt), revision: survives ? existing.revision + 1 : 0 };
+          tenureWrite = { id, uid, startsAt: survives ? existing.startsAt : Date.parse(next.paid.grant.startsAt), paidAccessEndsAt: Date.parse(next.paid.grant.expiresAt), revision: survives ? existing.revision + 1 : 0 };
           if (!isPaidTenure(tenureWrite)) throw new LifecycleError(409, 'lifecycle_conflict', 'This transition would create invalid retention history.');
           const promotion = isLifecycle(saved) ? saved.retention?.trialPromotion : undefined;
           // Survival is assessed when activation commits, never retroactively from billing dates.

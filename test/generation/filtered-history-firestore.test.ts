@@ -1,3 +1,4 @@
+import { sourceDeadline, contentDeadline, trialPolicy } from '../helpers/retention.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
@@ -21,7 +22,7 @@ test('feature-filtered output reads preserve complete mixed history and effectiv
   const project = account.collection('projects').doc('history-project');
   const outputs = project.collection('outputs');
   let clock = start;
-  const lifecycle = createLifecycleStore(db, { retentionEnabled: true, now: () => clock });
+  const lifecycle = createLifecycleStore(db, { now: () => clock });
   try {
     await project.set({ uid, id: project.id, status: 'ready' });
     await lifecycle.startTrial(uid, start);
@@ -31,13 +32,13 @@ test('feature-filtered output reads preserve complete mixed history and effectiv
     await lifecycle.transition(uid, 'history-renewal', { type: 'renew', expectedRevision: paid.revision, plan: 'lower', periodId: randomUUID(), startsAt: iso(clock), expiresAt: iso(start + 65 * day) });
     clock = start + 100 * day;
     const write = db.batch();
-    const seed = (id: string, value: Record<string, unknown>) => write.set(outputs.doc(id), { id, feature: 'x_posts', text: `Lesson ${id}`, createdAt: start, expiresAt: clock + day, model: 'fixture', promptVersion: 'fixture', ...value });
+    const seed = (id: string, value: Record<string, unknown>) => write.set(outputs.doc(id), { id, feature: 'x_posts', text: `Lesson ${id}`, createdAt: start, model: 'fixture', promptVersion: 'fixture', expiresAt: clock + day, retention: { version: 1, kind: 'paid', tenureId: paid.retention!.paidTenureId!, promisedUntil: clock + day }, ...value });
     for (let index = 0; index < 16; index++) {
       seed(`x-${String(index).padStart(2, '0')}`, { createdAt: start + index, ...(index % 2 ? { data: { kind: 'thread', posts: [`Thread ${index} first`, `Thread ${index} second`] } } : {}) });
     }
     seed('promoted-trial', { createdAt: start + 20, expiresAt: start + 30 * day, retention: { version: 1, kind: 'trial', startsAt: start, promisedUntil: start + 30 * day } });
     seed('renewed-paid', { createdAt: start + 20, expiresAt: start + 95 * day, retention: { version: 1, kind: 'paid', tenureId: paid.retention!.paidTenureId!, promisedUntil: start + 95 * day } });
-    seed('expired', { createdAt: clock, expiresAt: clock });
+    seed('expired', { createdAt: start - 30 * day, expiresAt: start, retention: trialPolicy(start) });
     seed('invalid-thread', { createdAt: clock, data: { kind: 'thread', posts: [42] } });
     seed('linkedin', { feature: 'linkedin_posts', createdAt: clock });
     seed('blog', { feature: 'blogs', createdAt: clock, data: { title: 'Title', bodyMarkdown: 'Body' } });

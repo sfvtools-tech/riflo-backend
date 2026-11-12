@@ -1,3 +1,5 @@
+import { outputFingerprint } from '../../src/generation/history.js';
+import { createDevelopmentAccess } from '../../src/access/development-access.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
@@ -24,7 +26,7 @@ async function fixture() {
   const db = getFirestore(app);
   const account = db.collection('accounts').doc(uid);
   const grant = db.collection('subscriptionGrants').doc(uid);
-  await grant.set({ status: 'active', startsAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 86_400_000).toISOString(), features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, key === 'sourceSeconds' ? 600 : 30])) });
+  const access = await createDevelopmentAccess(db, uid, { status: 'active', startsAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 86_400_000).toISOString(), features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, key === 'sourceSeconds' ? 600 : 30])) }, now);
   const intake = createProjectStore(db);
   const store = createGenerationStore(db);
   let clock = now;
@@ -33,10 +35,18 @@ async function fixture() {
   assert.ok(claim);
   await intake.complete(claim, { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, project.id, claim.attempt) }, ++clock);
   const projectRef = account.collection('projects').doc(project.id);
-  await projectRef.collection('transcripts').doc('shared').set({ ...transcript, createdAt: clock, expiresAt: now + 86_400_000 });
+  await projectRef.collection('transcripts').doc('shared').set({ ...transcript, createdAt: clock, expiresAt: now + 61 * 86_400_000, retention: { version: 1, kind: 'paid', tenureId: access.retention.paidTenureId, promisedUntil: now + 61 * 86_400_000 } });
   const start = async (selection: Selection) => store.start(uid, project.id, randomUUID(), selection, ++clock);
   const next = async () => { const claim = await store.claim('worker', ++clock, 1000); assert.ok(claim); assert.equal(claim.stage, 'generate'); return claim; };
-  const seed = async (value: Partial<GeneratedOutput>) => projectRef.collection('outputs').doc(value.id ?? randomUUID()).set({ id: 'saved', feature: 'x_posts', text: 'Existing lesson.', createdAt: clock, expiresAt: now + 100_000, model: 'fixture', promptVersion: 'fixture', ...value });
+  const seed = async (value: Partial<GeneratedOutput>) => {
+    const id = value.id ?? randomUUID();
+    const expired = value.expiresAt !== undefined && value.expiresAt <= now;
+    const output = { id, feature: 'x_posts' as const, text: 'Existing lesson.', createdAt: clock, expiresAt: now + 61 * 86_400_000, model: 'fixture', promptVersion: 'fixture', ...value };
+    const retention = expired
+      ? { version: 1 as const, kind: 'trial' as const, startsAt: now - 30 * 86_400_000, promisedUntil: now }
+      : { version: 1 as const, kind: 'paid' as const, tenureId: access.retention.paidTenureId, promisedUntil: output.expiresAt };
+    await projectRef.collection('outputs').doc(id).set({ ...output, ...(expired ? { createdAt: now - 29 * 86_400_000 } : {}), retention, contentFingerprint: outputFingerprint(output.feature, output) });
+  };
   return { uid, app, db, account, project, projectRef, intake, store, start, next, seed, tick: () => ++clock, clock: () => clock, async close() {
     for (const collection of ['generationJobs', 'intakeJobs']) {
       const docs = await db.collection(collection).where('uid', '==', uid).get();

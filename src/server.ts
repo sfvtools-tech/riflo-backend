@@ -6,7 +6,7 @@ import { readDriveConfig } from './sources/drive/config.js';
 import { readGenerationConfig } from './generation/config.js';
 import { readYouTubeConfig } from './sources/config.js';
 import { verifyYouTubeTools } from './sources/youtube.js';
-import { readTrialConfig, readRetentionConfig, readTrialAbuseKey } from './config.js';
+import { readTrialConfig, readTrialAbuseKey } from './config.js';
 
 const environment = process.env.NODE_ENV;
 if (Object.keys(process.env).some((key) => key.endsWith('_EMULATOR_HOST')) && !['development', 'test'].includes(environment ?? '')) {
@@ -20,9 +20,7 @@ const youtubeConfig = readYouTubeConfig(process.env);
 if (youtubeConfig) await verifyYouTubeTools(youtubeConfig);
 const shutdown = new AbortController();
 const trialEnabled = readTrialConfig(process.env);
-const retentionEnabled = readRetentionConfig(process.env);
-if (trialEnabled && !retentionEnabled) throw new Error('Trial intake requires RETENTION_ENABLED.');
-const dependencies = createFirebaseDependencies(projectId, readDriveConfig(process.env), process.env.FIREBASE_STORAGE_BUCKET, readGenerationConfig(process.env), youtubeConfig, trialEnabled, retentionEnabled, readTrialAbuseKey(process.env));
+const dependencies = createFirebaseDependencies(projectId, readDriveConfig(process.env), process.env.FIREBASE_STORAGE_BUCKET, readGenerationConfig(process.env), youtubeConfig, trialEnabled, readTrialAbuseKey(process.env));
 dependencies.streamMaxMilliseconds = Number(process.env.STREAM_MAX_MILLISECONDS ?? 300_000);
 dependencies.streamMaxActive = Number(process.env.STREAM_MAX_ACTIVE ?? 100);
 dependencies.streamMaxPerAccount = Number(process.env.STREAM_MAX_PER_ACCOUNT ?? 5);

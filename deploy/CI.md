@@ -47,7 +47,7 @@ Use repository **Settings → Secrets and variables → Actions**. Do not put pr
 | Secrets | `ANTHROPIC_API_KEY`, `DEEPGRAM_API_KEY` |
 | Variables | `FIREBASE_PROJECT_ID`, `FIREBASE_STORAGE_BUCKET`, `CORS_ALLOWED_ORIGINS` |
 | Variables | `ANTHROPIC_TEXT_MODEL`, `ANTHROPIC_VIDEO_MODEL`, `ANTHROPIC_NEWSLETTER_MODEL`, `DEEPGRAM_MODEL`, `DEEPGRAM_LANGUAGE` |
-| Variables | `GENERATION_MAX_OUTPUT_TOKENS`, `GENERATION_LONG_FORM_MAX_OUTPUT_TOKENS`, `GENERATION_STAGE_TIMEOUT_MS`, `TRIAL_ENABLED`, `RETENTION_ENABLED` |
+| Variables | `GENERATION_MAX_OUTPUT_TOKENS`, `GENERATION_LONG_FORM_MAX_OUTPUT_TOKENS`, `GENERATION_STAGE_TIMEOUT_MS`, `TRIAL_ENABLED` |
 
 Keep current model, token, timeout and feature values during the first migration. Missing required settings fail before services are touched. GitHub is authoritative for application settings: absent optional values explicitly remove the corresponding override, returning it to its application default. Transfer any wanted existing optional overrides into GitHub before migrating. Host-owned settings remain unchanged.
 
@@ -67,3 +67,5 @@ The runner creates a private temporary payload, transfers it over IAP/SSH, then 
 4. Install these reviewed helpers immediately before merging the new workflow. The new helper requires the configuration JSON prefix and cannot accept an old workflow's archive-only payload.
 5. Merge and monitor the first code deployment. It installs the application's configuration validator; configuration-only runs are unavailable until this code deployment succeeds.
 6. If the migration stops before the new workflow is in place, restore the previous root-owned helpers before retrying an old workflow. After the new workflow is active, keep its matching helpers and investigate failed preflight checks; failed activation automatically restores the previous application and environment.
+
+Before deploying the single-policy retention release, stop application writers and perform the separately authorized clean data reset. Update the installed deployment helper from this revision first: earlier helpers require the removed retention flag in configuration payloads. Remove that obsolete GitHub variable and runtime setting during deployment. This source change does not modify the live helper or data.

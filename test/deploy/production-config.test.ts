@@ -5,7 +5,7 @@ import { validateProductionConfig } from '../../src/validate-production-config.j
 const environment = {
   NODE_ENV: 'production', FIREBASE_PROJECT_ID: 'riflo-test', FIREBASE_STORAGE_BUCKET: 'riflo-test.firebasestorage.app',
   CORS_ALLOWED_ORIGINS: 'https://riflo-test.web.app', ANTHROPIC_API_KEY: 'test-anthropic', DEEPGRAM_API_KEY: 'test-deepgram',
-  FFMPEG_PATH: '/usr/bin/ffmpeg', FFPROBE_PATH: '/usr/bin/ffprobe', TRIAL_ENABLED: 'false', RETENTION_ENABLED: 'false',
+  FFMPEG_PATH: '/usr/bin/ffmpeg', FFPROBE_PATH: '/usr/bin/ffprobe', TRIAL_ENABLED: 'false',
 };
 
 test('production configuration validates without starting services or enabling optional features', () => {
@@ -24,4 +24,8 @@ test('production deployment rejects disabled generation, incomplete integrations
     { STREAM_MAX_ACTIVE: 'NaN' },
     { FIRESTORE_EMULATOR_HOST: 'localhost:8080' },
   ]) assert.throws(() => validateProductionConfig({ ...environment, ...override }));
+});
+
+test('trial deployment requires its abuse key without a retention switch', () => {
+  assert.doesNotThrow(() => validateProductionConfig({ ...environment, TRIAL_ENABLED: 'true', TRIAL_ABUSE_HMAC_KEY: 'ab'.repeat(32) }));
 });

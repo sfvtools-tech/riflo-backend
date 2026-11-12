@@ -1,3 +1,5 @@
+import { createLifecycleStore } from '../../src/access/lifecycle-firestore.js';
+import { createDevelopmentAccess } from '../../src/access/development-access.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
@@ -14,8 +16,8 @@ import { parseSourceInput } from '../../src/sources/source.js';
 const emulatorOnly = { skip: !process.env.FIRESTORE_EMULATOR_HOST };
 const now = Date.parse('2026-10-18T12:00:00Z');
 
-async function withStore(run: (context: Awaited<ReturnType<typeof setup>>) => Promise<void>, allowance = 3600) {
-  const context = await setup(allowance);
+async function withStore(run: (context: Awaited<ReturnType<typeof setup>>) => Promise<void>, allowance = 3600, expiresAt = '2026-11-01T00:00:00Z') {
+  const context = await setup(allowance, expiresAt);
   try { await run(context); }
   finally {
     const jobs = await context.db.collection('intakeJobs').where('uid', '==', context.uid).get();
@@ -29,13 +31,13 @@ async function withStore(run: (context: Awaited<ReturnType<typeof setup>>) => Pr
   }
 }
 
-async function setup(allowance: number) {
+async function setup(allowance: number, expiresAt: string) {
   const uid = `project-test-${randomUUID()}`;
   const app = initializeApp({ projectId: 'demo-riflo' }, uid);
   const db = getFirestore(app);
   const store = createProjectStore(db);
-  const grant = { status: 'active', startsAt: '2026-10-01T00:00:00Z', expiresAt: '2026-11-01T00:00:00Z', features: [...featureIds], limits: Object.fromEntries(quotaKeys.map((key) => [key, key === 'sourceSeconds' ? allowance : 1])) };
-  await db.collection('subscriptionGrants').doc(uid).set(grant);
+  const grant = { status: 'active', startsAt: '2026-10-01T00:00:00Z', expiresAt, features: [...featureIds], limits: Object.fromEntries(quotaKeys.map((key) => [key, key === 'sourceSeconds' ? allowance : 1])) };
+  Object.assign(grant, await createDevelopmentAccess(db, uid, grant, now));
   const create = (key: string = randomUUID(), seconds: number | null = 60, fileId = 'video-id') => store.create({
     uid, id: randomUUID(), key, now, input: { fileId },
     source: { fileId, name: 'video.mp4', mimeType: 'video/mp4', bytes: 9, durationSeconds: seconds, requiresProbe: true },
@@ -239,16 +241,16 @@ test('retention cleanup preserves consumed source allowance and completed deleti
     const path = sourcePath(uid, project.id, 1);
     await store.complete(claim, { bytes: 9, durationSeconds: 60, storagePath: path }, now + 1);
     const removed: string[] = [];
-    const worker = createIntakeWorker({ store, now: () => now + 8 * 86_400_000, importSource: async () => { throw Error('must not import'); }, deleteSource: async (path) => { removed.push(path); } });
+    const worker = createIntakeWorker({ store, now: () => now + 61 * 86_400_000, importSource: async () => { throw Error('must not import'); }, deleteSource: async (path) => { removed.push(path); } });
     await worker.cleanup();
     const assets = createGenerationStore(db, { remove: async path => { if (path.startsWith(`accounts/${uid}/`)) removed.push(path); } });
-    for (let pass = 0; pass < 3; pass++) await assets.cleanup(now + 8 * 86_400_000);
+    for (let pass = 0; pass < 3; pass++) await assets.cleanup(now + 61 * 86_400_000);
     assert.ok(removed.includes(path));
     assert.ok(removed.includes(sourcePath(uid, project.id, 1, 'mp4')));
     assert.ok(removed.every(path => path.includes('/source/attempt-1.')));
     const removals = [...removed];
     assert.equal((await store.get(uid, project.id))!.status, 'source_expired');
-    assert.ok(!(await store.expiredSources(now + 9 * 86_400_000)).some((source) => source.id === project.id));
+    assert.ok(!(await store.expiredSources(now + 62 * 86_400_000)).some((source) => source.id === project.id));
     await worker.cleanup();
     assert.deepEqual(removed, removals);
     assert.equal((await store.usage(uid, now) as any).reserved.sourceSeconds, 0);
@@ -391,7 +393,6 @@ test('manual retry is atomic, preserves attempt history and grants a fresh autom
     assert.equal((await store.usage(uid, now + 3) as any).reserved.sourceSeconds, 60);
     assert.equal((await db.collection('accounts').doc(uid).collection('processing').doc('current').get()).data()!.queued, 1);
     assert.equal(await store.remove(uid, project.id, now + 4, true, stale), undefined);
-    await store.finishCleanup(uid, project.id, now + 4, stale);
     assert.equal((await store.get(uid, project.id))!.status, 'queued');
     await assert.rejects(store.retry({ ...request, key: 'another-retry-key' }), { code: 'import_not_failed' });
     await assert.rejects(store.retry({ ...request, uid: 'someone-else' }), { code: 'project_not_found' });
@@ -540,16 +541,16 @@ test('ready replacement consumes allowance without charging the failed import ag
 
 test('accepted source caps follow paid eligibility while trial funds the lower-plan import', emulatorOnly, async () => {
   await withStore(async ({ db, uid, store }) => {
-    const { startTrial, transitionLifecycle } = await import('../../src/access/lifecycle.js');
+    await db.collection('subscriptionGrants').doc(uid).delete();
+    const lifecycle = createLifecycleStore(db, { now: () => now });
     const { sourcePlanLimits } = await import('../../src/access/source-limits.js');
-    const trial = startTrial(null, 'trial-cap-period', now);
-    const paid = transitionLifecycle(trial, { type: 'activate_paid', expectedRevision: 1, plan: 'lower', periodId: 'paid-cap-period', startsAt: new Date(now).toISOString(), expiresAt: new Date(now + 30 * 86400000).toISOString() }, now);
-    await db.collection('subscriptionGrants').doc(uid).set(paid);
+    const trial = await lifecycle.startTrial(uid, now);
+    const paid = await lifecycle.transition(uid, 'trial-cap-period', { type: 'activate_paid', expectedRevision: 1, plan: 'lower', periodId: 'paid-cap-period', startsAt: new Date(now).toISOString(), expiresAt: new Date(now + 30 * 86400000).toISOString() });
     const project = await store.create({ uid, id: randomUUID(), key: randomUUID(), now, input: { fileId: 'long' }, source: { fileId: 'long', name: 'long.mp4', mimeType: 'video/mp4', bytes: 5000000000, durationSeconds: 2400, requiresProbe: true } });
     assert.deepEqual(project.sourceLimits, sourcePlanLimits.lower);
     assert.equal(project.reservedSourceSeconds, 2400);
     assert.equal(project.sourceFunding!.length, 1);
-    assert.equal(project.sourceFunding![0]!.period, 'shared-trial-cap-period');
+    assert.equal(project.sourceFunding![0]!.period, `shared-${trial.trial!.allowancePeriodId}`);
     await assert.rejects(store.create({ uid, id: randomUUID(), key: randomUUID(), now, input: { fileId: 'oversize' }, source: { fileId: 'oversize', name: 'long.mp4', mimeType: 'video/mp4', bytes: 5000000001, durationSeconds: 60, requiresProbe: true } }), { code: 'source_too_large', status: 422 });
     await assert.rejects(store.create({ uid, id: randomUUID(), key: randomUUID(), now, input: { fileId: 'overtime' }, source: { fileId: 'overtime', name: 'long.mp4', mimeType: 'video/mp4', bytes: 1, durationSeconds: 2700.001, requiresProbe: true } }), { code: 'source_too_long', status: 422 });
   });
@@ -557,11 +558,11 @@ test('accepted source caps follow paid eligibility while trial funds the lower-p
 
 test('source snapshots survive plan changes and replay while unknown duration reserves the accepted cap', emulatorOnly, async () => {
   await withStore(async ({ db, uid, store }) => {
-    const { startTrial, transitionLifecycle } = await import('../../src/access/lifecycle.js');
+    await db.collection('subscriptionGrants').doc(uid).delete();
+    const lifecycle = createLifecycleStore(db, { now: () => now });
     const { sourcePlanLimits } = await import('../../src/access/source-limits.js');
-    const trial = startTrial(null, 'trial-high-cap', now);
-    const paid = transitionLifecycle(trial, { type: 'activate_paid', expectedRevision: 1, plan: 'higher', periodId: 'paid-high-cap', startsAt: new Date(now).toISOString(), expiresAt: new Date(now + 30 * 86400000).toISOString() }, now);
-    await db.collection('subscriptionGrants').doc(uid).set(paid);
+    const trial = await lifecycle.startTrial(uid, now);
+    const paid = await lifecycle.transition(uid, 'trial-high-cap', { type: 'activate_paid', expectedRevision: 1, plan: 'higher', periodId: 'paid-high-cap', startsAt: new Date(now).toISOString(), expiresAt: new Date(now + 30 * 86400000).toISOString() });
     const input = { source: 'youtube' as const, videoId: 'abcdefghijk' };
     const project = await store.create({ uid, id: randomUUID(), key: 'durable-high-key', now, input, source: { ...input, name: 'long', mimeType: 'video/mp4', bytes: null, durationSeconds: null, requiresProbe: true } });
     assert.equal(project.reservedSourceSeconds, 3600);
@@ -580,11 +581,11 @@ test('source snapshots survive plan changes and replay while unknown duration re
 
 test('transactional admission rejects metadata under the current plan and explicit retry resnapshots caps', emulatorOnly, async () => {
   await withStore(async ({ db, uid, store }) => {
-    const { startTrial, transitionLifecycle } = await import('../../src/access/lifecycle.js');
+    await db.collection('subscriptionGrants').doc(uid).delete();
+    const lifecycle = createLifecycleStore(db, { now: () => now });
     const { sourcePlanLimits } = await import('../../src/access/source-limits.js');
-    const trial = startTrial(null, 'retry-trial-cap', now);
-    const paid = transitionLifecycle(trial, { type: 'activate_paid', expectedRevision: 1, plan: 'higher', periodId: 'retry-paid-cap', startsAt: new Date(now).toISOString(), expiresAt: new Date(now + 30 * 86400000).toISOString() }, now);
-    await db.collection('subscriptionGrants').doc(uid).set(paid);
+    const trial = await lifecycle.startTrial(uid, now);
+    const paid = await lifecycle.transition(uid, 'retry-trial-cap', { type: 'activate_paid', expectedRevision: 1, plan: 'higher', periodId: 'retry-paid-cap', startsAt: new Date(now).toISOString(), expiresAt: new Date(now + 30 * 86400000).toISOString() });
     const input = { fileId: 'retry-cap' };
     const source = { ...input, name: 'retry.mp4', mimeType: 'video/mp4', bytes: 6000000000, durationSeconds: 3600, requiresProbe: true };
     const created = await store.create({ uid, id: randomUUID(), key: randomUUID(), now, input, source });
@@ -613,67 +614,68 @@ test('source restoration reuses intake with fresh funding, immutable attempts an
     const hash = 'a'.repeat(64);
     await store.complete(original, { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, project.id, 1), sourceSha256: hash }, now + 1);
     const ref = db.collection('accounts').doc(uid).collection('projects').doc(project.id);
-    const transcript = { text: 'Retained words.', words: [{ text: 'Retained words.', start: 0, end: 2 }], sourceSha256: hash, createdAt: now, expiresAt: now + 100000 };
+    const transcript = { text: 'Retained words.', words: [{ text: 'Retained words.', start: 0, end: 2 }], sourceSha256: hash, createdAt: now, expiresAt: Date.parse('2027-05-30T00:00:00Z'), retention: { ...project.retentionOrigin!, version: 1, promisedUntil: Date.parse('2027-05-30T00:00:00Z') } };
     await ref.collection('transcripts').doc('shared').set(transcript);
-    await ref.update({ sourceExpiresAt: now + 2 });
+    const restoreNow = now + 61 * 86_400_000;
     const expired = (await store.get(uid, project.id))!;
-    const request = { intent: 'source_restore' as const, uid, id: project.id, key: 'restore-first', source: expired.source, attempts: expired.attempts, updatedAt: expired.updatedAt, now: now + 3 };
+    const request = { intent: 'source_restore' as const, uid, id: project.id, key: 'restore-first', source: expired.source, attempts: expired.attempts, updatedAt: expired.updatedAt, now: restoreNow + 3 };
     const accepted = await store.retry(request);
     assert.equal(accepted.sourceSha256, hash);
     assert.equal(accepted.importIntent, 'source_restore');
     assert.equal((await store.retry(request)).importOperationId, accepted.importOperationId);
     assert.equal((await store.lookupRetry(uid, project.id, request.key, 'source_restore'))!.importOperationId, accepted.importOperationId);
     assert.equal(await store.lookupRetry(uid, project.id, request.key), null);
-    assert.equal((await store.usage(uid, now + 3)).reserved.sourceSeconds, 60);
-    await assert.rejects(createGenerationStore(db).start(uid, project.id, 'generation-during-restore', { x_posts: 1, linkedin_posts: 0 }, now + 3), { code: 'source_not_ready' });
-    const restored = (await store.claim('restorer', now + 4, 1000))!;
+    assert.equal((await store.usage(uid, restoreNow + 3)).reserved.sourceSeconds, 60);
+    await assert.rejects(createGenerationStore(db).start(uid, project.id, 'generation-during-restore', { x_posts: 1, linkedin_posts: 0 }, restoreNow + 3), { code: 'source_not_ready' });
+    const restored = (await store.claim('restorer', restoreNow + 4, 1000))!;
     assert.equal(restored.attempt, 2);
-    assert.equal(await store.complete(original, { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, project.id, 1), sourceSha256: hash }, now + 5), false);
+    assert.equal(await store.complete(original, { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, project.id, 1), sourceSha256: hash }, restoreNow + 5), false);
     const restoredResult = { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, project.id, 2), sourceSha256: hash };
-    await assert.rejects(store.complete(restored, { ...restoredResult, sourceSha256: 'b'.repeat(64) }, now + 5), { code: 'source_changed' });
+    await assert.rejects(store.complete(restored, { ...restoredResult, sourceSha256: 'b'.repeat(64) }, restoreNow + 5), { code: 'source_changed' });
     await ref.collection('transcripts').doc('shared').update({ sourceSha256: 'b'.repeat(64) });
-    await assert.rejects(store.complete(restored, restoredResult, now + 5), { code: 'source_identity_unverified' });
+    await assert.rejects(store.complete(restored, restoredResult, restoreNow + 5), { code: 'source_identity_unverified' });
     await ref.collection('transcripts').doc('shared').set(transcript);
-    await ref.collection('retentionDeletions').doc(`source-${project.id}`).set({ deletedAt: now + 2 });
-    await ref.collection('retentionDeletions').doc('output-retained').set({ deletedAt: now + 2 });
-    assert.equal(await store.complete(restored, restoredResult, now + 5), true);
-    assert.equal((await ref.collection('retentionDeletions').doc(`source-${project.id}`).get()).exists, false);
-    assert.equal((await ref.collection('retentionDeletions').doc('output-retained').get()).exists, true);
-    assert.equal(await store.remove(uid, project.id, now + 6, true, { uid, id: project.id, storagePath: expired.storagePath, sourceExpiresAt: expired.sourceExpiresAt, attempts: expired.attempts }), undefined);
-    assert.equal((await store.usage(uid, now + 5)).consumed.sourceSeconds, 120);
-    assert.equal((await store.usage(uid, now + 5)).reserved.sourceSeconds, 0);
+    assert.equal(await store.complete(restored, restoredResult, restoreNow + 5), true);
+    assert.equal(await store.remove(uid, project.id, restoreNow + 6, true, { uid, id: project.id, storagePath: expired.storagePath, sourceExpiresAt: expired.sourceExpiresAt, attempts: expired.attempts }), undefined);
+    assert.equal((await store.usage(uid, restoreNow + 5)).consumed.sourceSeconds, 120);
+    assert.equal((await store.usage(uid, restoreNow + 5)).reserved.sourceSeconds, 0);
     assert.deepEqual((await ref.collection('transcripts').doc('shared').get()).data(), transcript);
     assert.equal((await store.get(uid, project.id))!.storagePath, sourcePath(uid, project.id, 2));
-    await assert.rejects(store.retry({ ...request, key: 'restore-live-copy', attempts: 2, updatedAt: now + 5, now: now + 6 }), { code: 'source_restore_not_available' });
-  });
+    await assert.rejects(store.retry({ ...request, key: 'restore-live-copy', attempts: 2, updatedAt: restoreNow + 5, now: restoreNow + 6 }), { code: 'source_restore_not_available' });
+  }, 3600, '2027-03-31T00:00:00Z');
 });
 
 test('restore rejects unverified live cache and active generation, preserves failure intent and original identity', emulatorOnly, async () => {
   await withStore(async ({ store, uid, db, create }) => {
+    await db.collection('subscriptionGrants').doc(uid).delete();
+    let clock = now;
+    const lifecycle = createLifecycleStore(db, { now: () => clock });
+    await lifecycle.startTrial(uid, now);
     const project = await create();
     const original = (await store.claim('original', now, 1000))!;
     await store.complete(original, { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, project.id, 1) }, now + 1);
     const ref = db.collection('accounts').doc(uid).collection('projects').doc(project.id);
-    await ref.update({ sourceExpiresAt: now + 2 });
-    const transcript = { text: 'Old text.', words: [{ text: 'Old text.', start: 0, end: 2 }], createdAt: now, expiresAt: now + 100000 };
+    const transcript = { text: 'Old text.', words: [{ text: 'Old text.', start: 0, end: 2 }], createdAt: now, expiresAt: now + 30 * 86_400_000, retention: { ...project.retentionOrigin!, version: 1, promisedUntil: now + 30 * 86_400_000 } };
     await ref.collection('transcripts').doc('shared').set(transcript);
     const expired = (await store.get(uid, project.id))!;
-    const request = { intent: 'source_restore' as const, uid, id: project.id, key: 'restore-legacy', source: expired.source, attempts: expired.attempts, updatedAt: expired.updatedAt, now: now + 3 };
+    const request = { intent: 'source_restore' as const, uid, id: project.id, key: 'restore-legacy', source: expired.source, attempts: expired.attempts, updatedAt: expired.updatedAt, now: now + 14 * 86_400_000 + 3 };
     await assert.rejects(store.retry(request), { code: 'source_identity_unverified' });
     assert.equal((await store.usage(uid, now + 3)).reserved.sourceSeconds, 0);
-    await ref.collection('transcripts').doc('shared').update({ expiresAt: now + 2 });
+    clock = now + 30 * 86_400_000 + 3;
+    await lifecycle.transition(uid, 'restore-paid-access', { type: 'activate_paid', expectedRevision: 1, plan: 'lower', periodId: 'restore-paid-period', startsAt: new Date(clock).toISOString(), expiresAt: new Date(clock + 30 * 86_400_000).toISOString() });
+    request.now = clock;
     await ref.collection('generation').doc('batch').set({ status: 'queued' });
     await assert.rejects(store.retry(request), { code: 'generation_in_progress' });
     await ref.collection('generation').doc('batch').delete();
     await store.retry(request);
-    const claim = (await store.claim('restorer', now + 4, 1000))!;
-    await store.fail(claim, { code: 'source_import_failed', retryable: false, bytes: 0 }, now + 5);
+    const claim = (await store.claim('restorer', clock + 1, 1000))!;
+    await store.fail(claim, { code: 'source_import_failed', retryable: false, bytes: 0 }, clock + 2);
     const failed = (await store.get(uid, project.id))!;
     assert.equal(failed.importIntent, 'source_restore');
-    assert.equal((await store.usage(uid, now + 5)).reserved.sourceSeconds, 0);
+    assert.equal((await store.usage(uid, clock + 2)).reserved.sourceSeconds, 0);
     assert.equal((await store.usage(uid, now + 5)).consumed.sourceSeconds, 60);
-    await assert.rejects(store.retry({ ...request, intent: undefined, key: 'bypass-restore', attempts: failed.attempts, updatedAt: failed.updatedAt, now: now + 100000 }), { code: 'import_not_failed' });
-    assert.equal((await ref.collection('transcripts').doc('shared').get()).data()!.expiresAt, now + 2);
+    await assert.rejects(store.retry({ ...request, intent: undefined, key: 'bypass-restore', attempts: failed.attempts, updatedAt: failed.updatedAt, now: clock + 100000 }), { code: 'import_not_failed' });
+    assert.equal((await ref.collection('transcripts').doc('shared').get()).data()!.expiresAt, now + 30 * 86_400_000);
   });
 });
 
@@ -683,17 +685,17 @@ test('project deletion cancels restoration without accepting late source or refu
     const hash = 'c'.repeat(64);
     const original = (await store.claim('original', now, 1000))!;
     await store.complete(original, { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, project.id, 1), sourceSha256: hash }, now + 1);
-    await db.collection('accounts').doc(uid).collection('projects').doc(project.id).update({ sourceExpiresAt: now + 2 });
+    const restoreNow = now + 61 * 86_400_000;
     const expired = (await store.get(uid, project.id))!;
-    await store.retry({ intent: 'source_restore', uid, id: project.id, key: 'restore-before-delete', source: expired.source, attempts: expired.attempts, updatedAt: expired.updatedAt, now: now + 3 });
-    const restoring = (await store.claim('restorer', now + 4, 1000))!;
-    await store.remove(uid, project.id, now + 5);
-    assert.equal(await store.complete(restoring, { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, project.id, 2), sourceSha256: hash }, now + 6), false);
+    await store.retry({ intent: 'source_restore', uid, id: project.id, key: 'restore-before-delete', source: expired.source, attempts: expired.attempts, updatedAt: expired.updatedAt, now: restoreNow + 3 });
+    const restoring = (await store.claim('restorer', restoreNow + 4, 1000))!;
+    await store.remove(uid, project.id, restoreNow + 5);
+    assert.equal(await store.complete(restoring, { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, project.id, 2), sourceSha256: hash }, restoreNow + 6), false);
     assert.equal(await store.get(uid, project.id), null);
-    assert.equal((await store.usage(uid, now + 6)).reserved.sourceSeconds, 0);
-    assert.equal((await store.usage(uid, now + 6)).consumed.sourceSeconds, 60);
-    await assert.rejects(store.retry({ intent: 'source_restore', uid, id: project.id, key: 'restore-deleted-project', source: expired.source, attempts: 2, updatedAt: now + 5, now: now + 6 }), { code: 'project_not_found' });
-  });
+    assert.equal((await store.usage(uid, restoreNow + 6)).reserved.sourceSeconds, 0);
+    assert.equal((await store.usage(uid, restoreNow + 6)).consumed.sourceSeconds, 60);
+    await assert.rejects(store.retry({ intent: 'source_restore', uid, id: project.id, key: 'restore-deleted-project', source: expired.source, attempts: 2, updatedAt: restoreNow + 5, now: restoreNow + 6 }), { code: 'project_not_found' });
+  }, 3600, '2027-03-31T00:00:00Z');
 });
 
 test('progress is canonical, fenced to the live attempt, cleared on retries and terminal states', emulatorOnly, async () => {
@@ -741,5 +743,28 @@ test('shutdown claim release preserves source reservation and never reuses attem
     assert.equal(resumed.attempt, 6);
     assert.deepEqual((await store.usage(uid, now + 6)).reserved, before.reserved);
     assert.equal(await store.complete(resumed, { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, project.id, 6) }, now + 7), true);
+  });
+});
+
+
+test('missing retention authority during import fails once and releases its reservation', emulatorOnly, async () => {
+  await withStore(async ({ store, uid, create, db }) => {
+    const project = await create();
+    const worker = createIntakeWorker({
+      store, now: () => now + 1,
+      importSource: async claim => {
+        await db.collection('accounts').doc(uid).collection('retentionTenures').doc((project.retentionOrigin as { tenureId: string }).tenureId).delete();
+        return { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, project.id, claim.attempt) };
+      },
+    });
+    assert.equal(await worker.runOnce(), true);
+    const failed = await store.get(uid, project.id);
+    assert.equal(failed?.status, 'failed');
+    assert.equal(failed?.errorCode, 'retention_unavailable');
+    assert.equal(failed?.attempts, 1);
+    assert.equal((await db.collection('intakeJobs').doc(project.id).get()).exists, false);
+    const usage = await store.usage(uid, now + 2);
+    assert.equal(usage.reserved.sourceSeconds, 0);
+    assert.equal(usage.consumed.sourceSeconds, 0);
   });
 });

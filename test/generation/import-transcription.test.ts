@@ -1,3 +1,4 @@
+import { createDevelopmentAccess } from '../../src/access/development-access.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -28,7 +29,7 @@ async function fixture() {
   const account = db.collection('accounts').doc(uid);
   const grantRef = db.collection('subscriptionGrants').doc(uid);
   const grant: LegacyGrant = { status: 'active', startsAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 3_600_000).toISOString(), features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, key === 'sourceSeconds' ? 120 : 2])) as LegacyGrant['limits'] };
-  await grantRef.set(grant);
+  Object.assign(grant, await createDevelopmentAccess(db, uid, grant, now));
   const intake = createProjectStore(db);
   const generation = createGenerationStore(db);
   const project = await intake.create({ uid, id: randomUUID(), key: randomUUID(), now, input: { fileId: 'fixture' }, source: { fileId: 'fixture', name: 'Video', mimeType: 'video/mp4', bytes: 9, durationSeconds: 60, requiresProbe: true } });
@@ -60,7 +61,7 @@ test('staged import transcript is hidden until source settlement and follows onl
     assert.equal((await f.ref.get()).data()?.status, 'importing');
     assert.equal(await f.generation.markProviderInvoked(claim, metadata, now + 1102), false);
     const staged = (await f.ref.collection('transcripts').doc('shared').get()).data()!;
-    assert.equal(liveTranscript(staged as never, claim.batch, now + 1101), false);
+    assert.equal(liveTranscript(staged as never, now + 1101), false);
     assert.equal(await f.generation.transcript(f.uid, f.project.id, now + 1101), null);
     assert.equal((await f.generation.availability!(f.uid, f.project.id, now + 1101)).outputs.x_posts.available, false);
     assert.equal((await f.account.collection('processing').doc('current').get()).data()?.active, f.project.id);

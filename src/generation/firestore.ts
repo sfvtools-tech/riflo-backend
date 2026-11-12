@@ -20,7 +20,7 @@ import { rejectsTranscriptionSource, transcriptionAvailability, transcriptionSou
 import { canonicalOutput, outputFingerprint } from './history.js';
 
 import { emptyCounters, readCounters, releaseSlotFunding, slotCharge, slotOwners } from '../access/accounting.js';
-import { workerEvent } from '../worker-health.js';
+import { safeWorkerCode, workerEvent } from '../worker-health.js';
 import { resolveAccess } from '../access/lifecycle.js';
 import { admittedRetention, readRetentionContext, retentionPolicy } from '../access/retention-firestore.js';
 import { allocations, available, covered, readLedgers, releaseFunding, reserve, settleFunding, writeLedgers, type Ledgers } from '../access/funding.js';
@@ -66,7 +66,7 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
   const runtimeRef = (uid: string) => account(uid).collection('processing').doc('current');
   const jobs = db.collection('generationJobs');
   let cursor: QueryDocumentSnapshot | undefined;
-  const retentionCursors = new Map<string, QueryDocumentSnapshot>();
+  const cleanupCursors = new Map<string, QueryDocumentSnapshot>();
   const eventRef = (claim: GenerationClaim) => account(claim.project.uid).collection('usageEvents').doc(generationEventId(claim.project.id, claim.batch.id, claim.stage, claim.slot?.id ?? null, claim.attempt));
   const validClaim = (job: Job | undefined, claim: GenerationClaim, now: number) => (job?.batchId ?? 'batch') === (claim.batch.id ?? 'batch') && job?.uid === claim.project.uid && job.projectId === claim.project.id && job.claimId === claim.claimId && job.workerId === claim.workerId && job.stage === claim.stage && job.slotId === (claim.slot?.id ?? null) && (claim.importOwner ? job.importOwner?.workerId === claim.importOwner.workerId && job.importOwner.attempt === claim.importOwner.attempt && job.importOwner.operationId === claim.importOwner.operationId : !job.importOwner && job.availableAt > now);
   const counters = readCounters;
@@ -112,7 +112,7 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
     const localSource = Boolean(claim.importOwner && importOwned && batch?.intent === 'import_transcription' && batch.importSource?.operationId === claim.importOwner.operationId && batch.importSource.result.sourceSha256 === claim.project.sourceSha256 && batch.importSource.result.durationSeconds === claim.project.source.durationSeconds && batch.importSource.result.bytes === claim.project.source.bytes);
     const available = Boolean(active && authorized && reserved && importOwned && (claim.stage === 'transcribe'
       ? (localSource || sourceAvailable(project, now, retention)) && !batch.transcriptReady && batch.transcriptionAttempts === claim.attempt
-      : slot?.status === 'pending' && slot.attempts === claim.attempt && liveTranscript(transcript, batch, now, retention) && (slot.feature !== 'short_videos' || sourceAvailable(project, now, retention))));
+      : slot?.status === 'pending' && slot.attempts === claim.attempt && liveTranscript(transcript, now, retention) && (slot.feature !== 'short_videos' || sourceAvailable(project, now, retention))));
     return { project, batch, transcript, available, authorized, reserved, retention, usage, importOwned };
   }
   function recordEvent(transaction: Transaction, claim: GenerationClaim, now: number, status: string, result: { usage: GenerationUsage; provider: string; model: string; rates: RateSnapshot | null; promptVersion?: string | null; validation?: ValidationIssue }, errorCode: string | null) {
@@ -162,6 +162,16 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
     batch.errorCode = code;
   }
 
+  async function retainedBatch(uid: string, batch: GenerationBatch, now: number, transaction?: Transaction): Promise<GenerationBatch> {
+    if (!batch.brand && !batch.controls) return batch;
+    const ref = db.collection('subscriptionGrants').doc(uid);
+    const access = (await (transaction ? transaction.get(ref) : ref.get())).data();
+    const context = await readRetentionContext(db, uid, access, [batch.snapshotRetention], transaction);
+    if (resolveRetention({ kind: 'output', retention: batch.snapshotRetention }, now, context).available) return batch;
+    const { brand, controls, ...status } = batch;
+    return status;
+  }
+
   return {
     async claimImport(intakeClaim, source, now) {
       return db.runTransaction(async transaction => {
@@ -196,7 +206,7 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
         }
         const sameImport = existing?.intent === 'import_transcription' && existing.importSource?.operationId === owner.operationId;
         if (sameImport && (existing.importSource!.result.sourceSha256 !== source.sourceSha256 || existing.importSource!.result.durationSeconds !== source.durationSeconds || existing.importSource!.result.bytes !== source.bytes)) throw new GenerationError(409, 'source_changed', 'The source changed while this import was being retried.');
-        if (transcript?.stagedImport?.operationId === owner.operationId && transcript.stagedImport.sourceSha256 === source.sourceSha256 && transcript.stagedImport.durationSeconds === source.durationSeconds && liveTranscript({ ...transcript, stagedImport: undefined }, existing, now, retention)) return null;
+        if (transcript?.stagedImport?.operationId === owner.operationId && transcript.stagedImport.sourceSha256 === source.sourceSha256 && transcript.stagedImport.durationSeconds === source.durationSeconds && liveTranscript({ ...transcript, stagedImport: undefined }, now, retention)) return null;
         if (sameImport && existing.status === 'failed') return null;
         if (sameImport && existing.status === 'completed') {
           existing.transcriptReady = false;
@@ -206,11 +216,11 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
           return null;
         }
         const snapshotRetention = retentionPolicy('output', project.retentionOrigin, retention);
-        const snapshotExpiresAt = snapshotRetention?.promisedUntil ?? now + operationalLimits.outputRetentionDays * 86_400_000;
+        const snapshotExpiresAt = snapshotRetention.promisedUntil;
         const batch: GenerationBatch = sameImport ? existing : {
           id: createId(), uid, projectId: id, intent: 'import_transcription', importSource: { operationId: owner.operationId, result: source },
-          ...(project.retentionOrigin ? { retentionOrigin: project.retentionOrigin } : {}),
-          snapshotExpiresAt, snapshotCleanupAt: snapshotExpiresAt, ...(snapshotRetention ? { snapshotRetention } : {}),
+          retentionOrigin: project.retentionOrigin,
+          snapshotExpiresAt, snapshotCleanupAt: snapshotExpiresAt, snapshotRetention,
           selection: { x_posts: 0, linkedin_posts: 0 }, slots: [], status: 'queued', createdAt: now, updatedAt: now,
           deadline: project.deadline, period: project.period, transcriptionAttempts: 0, transcriptReady: false, errorCode: null,
         };
@@ -246,7 +256,7 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
         return claim;
       });
     },
-    async lookup(uid, projectId, key, selection, brandRequest, intent, controls) {
+    async lookup(uid, projectId, key, selection, brandRequest, intent, controls, now = Date.now()) {
       const project = (await projectRef(uid, projectId).get()).data() as Project | undefined;
       if (!project || project.status === 'deleted') throw new GenerationError(404, 'project_not_found', 'Project not found.');
       const existing = (await batchRef(uid, projectId).get()).data();
@@ -257,7 +267,7 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
       const id = request?.batchId ?? existing?.id ?? 'batch';
       const saved = (existing?.id ?? 'batch') === id ? existing : (await historyRef(uid, projectId, id).get()).data();
       if (!saved) throw new GenerationError(409, 'request_unresolved', 'The original generation is unavailable. Preserve its request key.');
-      return saved as GenerationBatch;
+      return retainedBatch(uid, saved as GenerationBatch, now);
     },
     async start(uid, projectId, key, selection, now, brand, intent, controls) {
       return db.runTransaction(async (transaction) => {
@@ -272,7 +282,7 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
           const id = request?.batchId ?? existing?.id ?? 'batch';
           const saved = (existing?.id ?? 'batch') === id ? existing : (await transaction.get(historyRef(uid, projectId, id))).data() as GenerationBatch | undefined;
           if (!saved) throw new GenerationError(409, 'generation_not_found', 'The original generation request is unavailable.');
-          return saved;
+          return retainedBatch(uid, saved, now, transaction);
         }
         if (controls) validateControlsWindow(controls.snapshot, project.source.durationSeconds);
         if (project.status === 'queued' || project.status === 'importing') throw new GenerationError(409, 'source_not_ready', 'Wait for the source import to finish.');
@@ -280,8 +290,7 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
         const savedTranscript = (await transaction.get(transcriptRef(uid, projectId))).data() as SavedTranscript | undefined;
         const access = (await transaction.get(db.collection('subscriptionGrants').doc(uid))).data();
         const retention = await readRetentionContext(db, uid, access, [project.sourceRetention, savedTranscript?.retention, existing?.retentionOrigin], transaction);
-        const retentionOrigin = admittedRetention(access, now, retention);
-        const cached = liveTranscript(savedTranscript, existing, now, retention);
+        const cached = liveTranscript(savedTranscript, now, retention);
         const hasSource = sourceAvailable(project, now, retention);
         if (!hasSource && (!cached || (selection.short_videos ?? 0) > 0)) throw new GenerationError(409, project.status === 'source_expired' || (project.sourceExpiresAt !== null && project.sourceExpiresAt <= now) ? 'requires_reimport' : 'source_not_ready', 'Import the original video again for these outputs.');
         if (!intent && project.preparation && !cached) throw new GenerationError(409, 'transcript_not_ready', 'Prepare the transcript before creating content.');
@@ -323,17 +332,13 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
             slots.push({ id: createId(), feature, ordinal: index, status: 'pending', attempts: 0, errorCode: null, ...(feature === 'x_posts' && threadSettings ? { maxCredits: credits } : {}), ...(owners ? { charge: { credits, period, allocations: owners } } : {}) });
           }
         }
+        const retentionOrigin = admittedRetention(access, now, retention);
         const snapshotRetention = retentionPolicy('output', retentionOrigin, retention);
-        const snapshotExpiresAt = snapshotRetention?.promisedUntil ?? now + operationalLimits.outputRetentionDays * 86_400_000;
-        const batch: GenerationBatch = { snapshotExpiresAt, snapshotCleanupAt: snapshotExpiresAt, ...(snapshotRetention ? { snapshotRetention } : {}), ...(retentionOrigin ? { retentionOrigin } : {}), ...(isSharedCreditGrant(plan) ? { accounting: { mode: 'shared_credits', period } } : {}), ...(brand ? { brand: brand.snapshot } : {}), ...(controls ? { controls: controls.snapshot } : {}), ...(intent ? { intent } : {}), id: batchId, uid, projectId, selection, slots, status: intent && cached ? 'completed' : 'queued', createdAt: now, updatedAt: now, deadline: now + operationalLimits.projectLifetimeHours * 3_600_000, period, transcriptionAttempts: 0, transcriptReady: cached, errorCode: null };
+        const snapshotExpiresAt = snapshotRetention.promisedUntil;
+        const batch: GenerationBatch = { snapshotExpiresAt, snapshotCleanupAt: snapshotExpiresAt, snapshotRetention, retentionOrigin, ...(isSharedCreditGrant(plan) ? { accounting: { mode: 'shared_credits', period } } : {}), ...(brand ? { brand: brand.snapshot } : {}), ...(controls ? { controls: controls.snapshot } : {}), ...(intent ? { intent } : {}), id: batchId, uid, projectId, selection, slots, status: intent && cached ? 'completed' : 'queued', createdAt: now, updatedAt: now, deadline: now + operationalLimits.projectLifetimeHours * 3_600_000, period, transcriptionAttempts: 0, transcriptReady: cached, errorCode: null };
         if (existing) {
           transaction.set(historyRef(uid, projectId, existing.id ?? 'batch'), existing);
           transaction.set(requestRef(uid, projectId, existing.keyHash), { batchId: existing.id ?? 'batch', fingerprint: existing.fingerprint });
-        }
-        if (savedTranscript && savedTranscript.expiresAt === undefined) {
-          // Freeze the old batch's deadline even for expired transcripts before replacing that batch.
-          const expiresAt = transcriptExpiry(savedTranscript, existing, retention);
-          if (Number.isFinite(expiresAt)) transaction.update(transcriptRef(uid, projectId), { expiresAt });
         }
         transaction.set(batchRef(uid, projectId), { ...batch, keyHash, fingerprint });
         transaction.create(requestRef(uid, projectId, keyHash), { batchId, fingerprint });
@@ -359,7 +364,7 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
       const transcript = transcriptDoc.data() as SavedTranscript | undefined;
       const plan = planDoc.data();
       const retention = await readRetentionContext(db, uid, plan, [project.sourceRetention, transcript?.retention]);
-      const hasTranscript = liveTranscript(transcript, batch, now, retention);
+      const hasTranscript = liveTranscript(transcript, now, retention);
       const hasSource = sourceAvailable(project, now, retention);
       const resolved = resolveAccess(plan, now);
       const activePlan = resolved.grant;
@@ -386,13 +391,15 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
         transcription: transcriptionAvailability(project, batch, hasTranscript, Boolean(activePlan), now, retention),
         sourceAvailable: hasSource, transcriptAvailable: hasTranscript, activeBatch, outputs,
         sourceExpiresAt: sourceExpiry(project, retention) === null ? null : new Date(sourceExpiry(project, retention)!).toISOString(),
-        transcriptExpiresAt: transcript && Number.isFinite(transcriptExpiry(transcript, batch, retention)) ? new Date(transcriptExpiry(transcript, batch, retention)).toISOString() : null,
-        ...(transcript?.retention ? { transcriptRetentionMode: resolveRetention({ kind: 'transcript', expiresAt: transcript.expiresAt, retention: transcript.retention }, now, retention).mode } : {}),
+        transcriptExpiresAt: transcript && Number.isFinite(transcriptExpiry(transcript, retention)) ? new Date(transcriptExpiry(transcript, retention)).toISOString() : null,
+        ...(transcript?.retention ? { transcriptRetentionMode: resolveRetention({ kind: 'transcript', retention: transcript.retention }, now, retention).mode } : {}),
       };
     },
-    async batch(uid, projectId) {
+    async batch(uid, projectId, now = Date.now()) {
       const project = (await projectRef(uid, projectId).get()).data() as Project | undefined;
-      return project && project.status !== 'deleted' ? (await batchRef(uid, projectId).get()).data() as GenerationBatch | undefined ?? null : null;
+      if (!project || project.status === 'deleted') return null;
+      const batch = (await batchRef(uid, projectId).get()).data() as GenerationBatch | undefined;
+      return batch ? retainedBatch(uid, batch, now) : null;
     },
     async outputs(uid, projectId, now, feature) {
       const project = (await projectRef(uid, projectId).get()).data() as Project | undefined;
@@ -424,10 +431,10 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
       return output?.assets?.find(asset => asset.id === assetId) ?? null;
     },
     async transcript(uid, projectId, now = Date.now()) {
-      const [saved, project, batch, access] = await Promise.all([transcriptRef(uid, projectId).get(), projectRef(uid, projectId).get(), batchRef(uid, projectId).get(), db.collection('subscriptionGrants').doc(uid).get()]);
+      const [saved, project, access] = await Promise.all([transcriptRef(uid, projectId).get(), projectRef(uid, projectId).get(), db.collection('subscriptionGrants').doc(uid).get()]);
       const transcript = saved.data() as SavedTranscript | undefined;
       const retention = await readRetentionContext(db, uid, access.data(), [transcript?.retention]);
-      if (project.data()?.status === 'deleted' || !project.exists || !liveTranscript(transcript, batch.data() as GenerationBatch | undefined, now, retention)) return null;
+      if (project.data()?.status === 'deleted' || !project.exists || !liveTranscript(transcript, now, retention)) return null;
       return { text: transcript.text, words: transcript.words };
     },
     async claim(workerId, now, leaseMilliseconds) {
@@ -453,7 +460,7 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
             const reserved = reservationsCover(batch, project, usage);
             const transcript = (await transaction.get(transcriptRef(job.uid, job.projectId))).data() as SavedTranscript | undefined;
             const retention = await readRetentionContext(db, job.uid, plan, [project.sourceRetention, transcript?.retention, batch.retentionOrigin], transaction);
-            const hasTranscript = liveTranscript(transcript, batch, now, retention);
+            const hasTranscript = liveTranscript(transcript, now, retention);
             const hasSource = sourceAvailable(project, now, retention);
             if (batch.transcriptReady && hasTranscript && !hasSource) {
               for (const slot of batch.slots) {
@@ -522,7 +529,7 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
             batch.updatedAt = now;
             const claimId = createId();
             const leaseUntil = now + leaseMilliseconds;
-            const claim: GenerationClaim = { project: { ...project, sourceExpiresAt: sourceExpiry(project, retention) }, batch, workerId, claimId, stage, slot, attempt, startedAt: now, leaseUntil, transcriptExpiresAt: hasTranscript ? transcriptExpiry(transcript!, batch, retention) : null };
+            const claim: GenerationClaim = { project: { ...project, sourceExpiresAt: sourceExpiry(project, retention) }, batch, workerId, claimId, stage, slot, attempt, startedAt: now, leaseUntil, transcriptExpiresAt: hasTranscript ? transcriptExpiry(transcript!, retention) : null };
             if (!hasSource) writeLedgers(transaction, db, job.uid, usage);
             transaction.set(runtimeRef(job.uid), processing);
             transaction.set(batchRef(job.uid, job.projectId), batch, { merge: true });
@@ -570,7 +577,7 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
         if (!validClaim(job, claim, now) || !resources.available) return false;
         if (claim.importOwner) return true;
         claim.project.sourceExpiresAt = sourceExpiry(resources.project!, resources.retention);
-        claim.transcriptExpiresAt = resources.transcript ? transcriptExpiry(resources.transcript, resources.batch, resources.retention) : null;
+        claim.transcriptExpiresAt = resources.transcript ? transcriptExpiry(resources.transcript, resources.retention) : null;
         transaction.update(jobs.doc(generationJobId(claim.project.id, claim.batch.id)), { availableAt: now + leaseMilliseconds });
         return true;
       });
@@ -592,7 +599,7 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
         }
         const processing = batch.intent ? runtime((await transaction.get(runtimeRef(project.uid))).data()) : undefined;
         const policy = retentionPolicy('transcript', batch.retentionOrigin, retention);
-        transaction.set(transcriptRef(project.uid, project.id), { ...transcript, ...(claim.importOwner ? { stagedImport: { operationId: claim.importOwner.operationId, sourceSha256: claim.project.sourceSha256!, durationSeconds: claim.project.source.durationSeconds! } } : {}), ...(claim.project.sourceSha256 ? { sourceSha256: claim.project.sourceSha256 } : {}), ...(policy ? { retention: policy } : {}), createdAt: now, expiresAt: policy?.promisedUntil ?? now + operationalLimits.transcriptRetentionDays * 86_400_000, cleanupAt: policy?.promisedUntil ?? now + operationalLimits.transcriptRetentionDays * 86_400_000 });
+        transaction.set(transcriptRef(project.uid, project.id), { ...transcript, ...(claim.importOwner ? { stagedImport: { operationId: claim.importOwner.operationId, sourceSha256: claim.project.sourceSha256!, durationSeconds: claim.project.source.durationSeconds! } } : {}), ...(claim.project.sourceSha256 ? { sourceSha256: claim.project.sourceSha256 } : {}), retention: policy, createdAt: now, expiresAt: policy.promisedUntil, cleanupAt: policy.promisedUntil });
         if (batch.intent) {
           batch.transcriptReady = true;
           batch.transcriptionFailure = null;
@@ -637,7 +644,7 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
         const processing = runtime((await transaction.get(runtimeRef(project.uid))).data());
         const contentFingerprint = outputFingerprint(feature, content);
         const sameFeature = outputRefs(project.uid, project.id).where('feature', '==', feature);
-        const previous = await transaction.get(project.dedupVersion === 1 && contentFingerprint !== null ? sameFeature.where('contentFingerprint', '==', contentFingerprint) : sameFeature);
+        const previous = await transaction.get(contentFingerprint !== null ? sameFeature.where('contentFingerprint', '==', contentFingerprint) : sameFeature);
         const priorRetention = await readRetentionContext(db, project.uid, (await transaction.get(db.collection('subscriptionGrants').doc(project.uid))).data(), previous.docs.map(doc => (doc.data() as GeneratedOutput).retention), transaction);
         const canonical = canonicalOutput(feature, content);
         const duplicate = previous.docs.some(document => {
@@ -675,7 +682,7 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
         const policy = retentionPolicy('output', batch.retentionOrigin, retention);
         slot.status = 'ready'; slot.errorCode = null;
         batch.updatedAt = now;
-        transaction.set(outputRefs(project.uid, project.id).doc(slot.id), { id: slot.id, feature: slot.feature, text, ...(contentFingerprint ? { contentFingerprint } : {}), ...(thread ? { data: thread.content, deliveredPosts: delivered, credits: delivered, requestedMaxPosts: threadSettings!.maxPosts } : {}), ...(longForm ? { data: longForm.content } : {}), ...(carousel ? { data: carousel.content, assets: result.assets } : {}), ...(video ? { data: video.content, assets: result.assets } : {}), createdAt: now, expiresAt: policy?.promisedUntil ?? now + operationalLimits.outputRetentionDays * 86_400_000, cleanupAt: policy?.promisedUntil ?? now + operationalLimits.outputRetentionDays * 86_400_000, ...(policy ? { retention: policy } : {}), model: result.model, promptVersion: result.promptVersion ?? 'unknown' });
+        transaction.set(outputRefs(project.uid, project.id).doc(slot.id), { id: slot.id, feature: slot.feature, text, ...(contentFingerprint ? { contentFingerprint } : {}), ...(thread ? { data: thread.content, deliveredPosts: delivered, credits: delivered, requestedMaxPosts: threadSettings!.maxPosts } : {}), ...(longForm ? { data: longForm.content } : {}), ...(carousel ? { data: carousel.content, assets: result.assets } : {}), ...(video ? { data: video.content, assets: result.assets } : {}), createdAt: now, expiresAt: policy.promisedUntil, cleanupAt: policy.promisedUntil, retention: policy, model: result.model, promptVersion: result.promptVersion ?? 'unknown' });
         recordEvent(transaction, claim, now, 'succeeded', result, null);
         if (batch.slots.every((entry) => entry.status !== 'pending')) finishBatch(transaction, batch, { ...project, reservedSourceSeconds: 0 }, usage, processing, now);
         else {
@@ -744,59 +751,67 @@ export function createGenerationStore(db: Firestore, storage?: { remove: (path: 
     async cleanup(now) {
       for (const kind of ['transcripts', 'outputs', 'generation'] as const) {
         const candidateField = kind === 'generation' ? 'snapshotCleanupAt' : 'cleanupAt';
-        const due = await db.collectionGroup(kind).where(candidateField, '<=', now).limit(50).get();
-        let legacyQuery = db.collectionGroup(kind).orderBy('__name__').limit(50);
-        const cursor = retentionCursors.get(kind);
-        if (cursor) legacyQuery = legacyQuery.startAfter(cursor);
-        const legacy = await legacyQuery.get();
-        if (legacy.size === 50) retentionCursors.set(kind, legacy.docs.at(-1)!); else retentionCursors.delete(kind);
-        const candidates = new Map([...due.docs, ...legacy.docs.filter(doc => doc.data()[candidateField] === undefined)].map(doc => [doc.ref.path, doc]));
-        for (const candidate of candidates.values()) {
+        let query = db.collectionGroup(kind).where(candidateField, '<=', now).limit(50);
+        const after = cleanupCursors.get(kind);
+        if (after) query = query.startAfter(after);
+        const due = await query.get();
+        if (due.size === 50) cleanupCursors.set(kind, due.docs.at(-1)!);
+        else cleanupCursors.delete(kind);
+        for (const candidate of due.docs) {
           const match = /^accounts\/([^/]+)\/projects\/([^/]+)\/(?:transcripts|outputs|generation)\/([^/]+)$/.exec(candidate.ref.path);
           if (!match) continue;
-          const [, uid, projectId, id] = match;
-          await db.runTransaction(async transaction => {
-            const saved = await transaction.get(candidate.ref);
-            if (!saved.exists) return;
-            const value = saved.data()!;
-            const project = (await transaction.get(projectRef(uid, projectId))).data() as Project | undefined;
-            const access = (await transaction.get(db.collection('subscriptionGrants').doc(uid))).data();
-            const batch = kind === 'transcripts' ? (await transaction.get(batchRef(uid, projectId))).data() as GenerationBatch | undefined : undefined;
-            const policy = kind === 'generation' ? value.snapshotRetention : value.retention;
-            const retention = await readRetentionContext(db, uid, access, [policy], transaction);
-            const deadline = kind === 'generation' ? value.snapshotExpiresAt ?? value.createdAt + operationalLimits.outputRetentionDays * 86_400_000
-              : kind === 'transcripts' ? transcriptExpiry(value as SavedTranscript, batch, retention) : value.expiresAt;
-            const state = resolveRetention({ kind: kind === 'transcripts' ? 'transcript' : 'output', expiresAt: deadline, retention: policy }, now, retention);
-            if (project && project.status !== 'deleted' && !state.valid) {
-              transaction.update(candidate.ref, { [candidateField]: null, retentionCleanupError: 'retention_facts_unavailable' });
-              workerEvent('cleanup.quarantined', { code: 'retention_facts_unavailable' }, 'error');
-              return;
-            }
-            if (project && project.status !== 'deleted' && state.available) {
-              transaction.update(candidate.ref, { [candidateField]: state.expiresAt, ...(kind === 'generation' ? { snapshotExpiresAt: state.expiresAt } : { expiresAt: state.expiresAt }) });
-              return;
-            }
-            if (kind === 'generation') {
-              transaction.update(candidate.ref, { brand: FieldValue.delete(), controls: FieldValue.delete(), snapshotCleanupAt: null });
-            } else {
-              transaction.delete(candidate.ref);
-              transaction.set(projectRef(uid, projectId).collection('retentionDeletions').doc(`${kind === 'outputs' ? 'output' : 'transcript'}-${id}`), { kind, deletedAt: now, expiredAt: state.expiresAt });
-              if (kind === 'outputs') queueStorageCleanup(transaction, db.collection('assetCleanup').doc(digest(candidate.ref.path)), (value.assets ?? []).map((asset: OutputAsset) => asset.storagePath), now);
-            }
-          });
+          const [, uid, projectId] = match;
+          try {
+            await db.runTransaction(async transaction => {
+              const saved = await transaction.get(candidate.ref);
+              if (!saved.exists) return;
+              const value = saved.data()!;
+              const project = (await transaction.get(projectRef(uid, projectId))).data() as Project | undefined;
+              const access = (await transaction.get(db.collection('subscriptionGrants').doc(uid))).data();
+              const policy = kind === 'generation' ? value.snapshotRetention : value.retention;
+              const retention = await readRetentionContext(db, uid, access, [policy], transaction);
+              const state = resolveRetention({ kind: kind === 'transcripts' ? 'transcript' : 'output', retention: policy }, now, retention);
+              if (project && project.status !== 'deleted' && !state.valid) {
+                transaction.update(candidate.ref, { [candidateField]: null, retentionCleanupError: 'retention_facts_unavailable' });
+                workerEvent('cleanup.quarantined', { code: 'retention_facts_unavailable' }, 'error');
+                return;
+              }
+              if (project && project.status !== 'deleted' && state.available) {
+                transaction.update(candidate.ref, { [candidateField]: state.expiresAt, ...(kind === 'generation' ? { snapshotExpiresAt: state.expiresAt } : { expiresAt: state.expiresAt }) });
+                return;
+              }
+              if (kind === 'generation') {
+                transaction.update(candidate.ref, { brand: FieldValue.delete(), controls: FieldValue.delete(), snapshotCleanupAt: null });
+              } else {
+                transaction.delete(candidate.ref);
+                if (kind === 'outputs') queueStorageCleanup(transaction, db.collection('assetCleanup').doc(digest(candidate.ref.path)), (value.assets ?? []).map((asset: OutputAsset) => asset.storagePath), now);
+              }
+            });
+          } catch (error) {
+            workerEvent('cleanup.failed', { projectId, phase: kind, code: safeWorkerCode(error) }, 'error');
+          }
         }
       }
-      const deleted = await db.collectionGroup('projects').where('payloadCleanupPending', '==', true).limit(50).get();
+      let deletedQuery = db.collectionGroup('projects').where('payloadCleanupPending', '==', true).limit(50);
+      const afterDeleted = cleanupCursors.get('projects');
+      if (afterDeleted) deletedQuery = deletedQuery.startAfter(afterDeleted);
+      const deleted = await deletedQuery.get();
+      if (deleted.size === 50) cleanupCursors.set('projects', deleted.docs.at(-1)!);
+      else cleanupCursors.delete('projects');
       for (const entry of deleted.docs) {
-        await db.runTransaction(async transaction => {
-          const project = (await transaction.get(entry.ref)).data();
-          if (project?.status !== 'deleted') return;
-          const children = await Promise.all(['outputs', 'transcripts', 'generation', 'generationRequests', 'retentionDeletions', 'maintenance'].map(name => transaction.get(entry.ref.collection(name).limit(50))));
-          const paths = children[0].docs.flatMap(doc => (doc.data().assets ?? []).map((asset: OutputAsset) => asset.storagePath));
-          queueStorageCleanup(transaction, db.collection('assetCleanup').doc(`${entry.id}-deleted-payload`), paths, now);
-          for (const page of children) for (const doc of page.docs) transaction.delete(doc.ref);
-          if (children.every(page => page.empty)) transaction.delete(entry.ref);
-        });
+        try {
+          await db.runTransaction(async transaction => {
+            const project = (await transaction.get(entry.ref)).data();
+            if (project?.status !== 'deleted') return;
+            const children = await Promise.all(['outputs', 'transcripts', 'generation', 'generationRequests'].map(name => transaction.get(entry.ref.collection(name).limit(50))));
+            const paths = children[0].docs.flatMap(doc => (doc.data().assets ?? []).map((asset: OutputAsset) => asset.storagePath));
+            queueStorageCleanup(transaction, db.collection('assetCleanup').doc(`${entry.id}-deleted-payload`), paths, now);
+            for (const page of children) for (const doc of page.docs) transaction.delete(doc.ref);
+            if (children.every(page => page.empty)) transaction.delete(entry.ref);
+          });
+        } catch (error) {
+          workerEvent('cleanup.failed', { projectId: entry.id, phase: 'deleted project', code: safeWorkerCode(error) }, 'error');
+        }
       }
       if (storage) await runStorageCleanup(db, storage, now, async (owner, paths) => {
         return db.runTransaction(async transaction => {

@@ -1,3 +1,5 @@
+import { contentDeadline } from '../helpers/retention.js';
+import { createDevelopmentAccess } from '../../src/access/development-access.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
@@ -124,8 +126,8 @@ test('controls acceptance rejects out-of-source windows without reservation and 
     assert.equal(replay!.id, first.id);
     assert.deepEqual(replay!.controls, snapshot);
     const generations = account.collection('projects').doc(id).collection('generation');
-    for (const doc of (await generations.get()).docs) await doc.ref.update({ snapshotRetention: (await import('firebase-admin/firestore')).FieldValue.delete(), snapshotExpiresAt: now, snapshotCleanupAt: now });
-    await store.cleanup(now + 7);
+    const expiry = first.snapshotRetention!.promisedUntil;
+    await store.cleanup(expiry);
     for (const doc of (await generations.get()).docs) {
       assert.equal(doc.data().controls, undefined);
       assert.equal(doc.data().snapshotCleanupAt, null);
@@ -168,7 +170,7 @@ test('new batches and slots have independent v7 identities and replay keeps the 
 });
 
 test('retained outputs use delivery time then binary opaque ID order across legacy and v7 IDs', emulatorOnly, async () => {
-  await withStore(async ({ uid, db, store, readySource }) => {
+  await withStore(async ({ uid, db, store, grant, readySource }) => {
     const id = await readySource();
     const ref = db.collection('accounts').doc(uid).collection('projects').doc(id).collection('outputs');
     const fixture = [
@@ -178,8 +180,8 @@ test('retained outputs use delivery time then binary opaque ID order across lega
       { id: 'Z-legacy', createdAt: now + 2 },
       { id: 'a-legacy', createdAt: now + 2 },
     ];
-    await Promise.all(fixture.map(output => ref.doc(output.id).set({ ...output, feature: 'x_posts', text: output.id, model: 'private', promptVersion: 'private', expiresAt: now + 100 })));
-    await ref.doc('expired').set({ id: 'expired', feature: 'x_posts', text: 'expired', createdAt: now, expiresAt: now + 3 });
+    await Promise.all(fixture.map(output => ref.doc(output.id).set({ ...output, feature: 'x_posts', text: output.id, model: 'private', promptVersion: 'private', expiresAt: Date.parse(grant.expiresAt) + 60 * 86_400_000, retention: { version: 1, kind: 'paid', tenureId: (grant as any).retention.paidTenureId, promisedUntil: Date.parse(grant.expiresAt) + 60 * 86_400_000 } })));
+    await ref.doc('expired').set({ id: 'expired', feature: 'x_posts', text: 'expired', createdAt: now - 29 * 86_400_000, ...contentDeadline(now + 3) });
     const outputs = await store.outputs(uid, id, now + 3);
     assert.deepEqual(outputs.map(output => output.id), ['x_posts-1', '00000000-0000-4000-8000-000000000000', 'Z-legacy', 'a-legacy', 'ffffffff-ffff-7fff-8fff-ffffffffffff']);
     assert.equal((await store.output(uid, id, 'x_posts-1', now + 3))!.id, 'x_posts-1');
@@ -252,7 +254,7 @@ test('minimal batch responses preserve stored worker history, reservations and a
     const listed = await service.outputs(uid, id);
     const single = await service.output(uid, id, savedOutput.id);
     assert.deepEqual(listed, [single]);
-    assert.deepEqual(Object.keys(single).sort(), ['createdAt', 'expiresAt', 'feature', 'id', 'text']);
+    assert.deepEqual(Object.keys(single).sort(), ['createdAt', 'expiresAt', 'feature', 'id', 'retentionMode', 'text']);
     assert.deepEqual((await outputRef.get()).data(), savedOutput);
     assert.deepEqual((await events.get()).docs.map(doc => doc.data()), savedEvents);
     const usage = await intake.usage(uid, clock) as { consumed: Record<string, number>; reserved: Record<string, number> };
@@ -395,14 +397,14 @@ async function setup() {
   const db = getFirestore(app);
   const intake = createProjectStore(db);
   const store = createGenerationStore(db);
-  const grant = { status: 'active', startsAt: '2026-10-01T00:00:00Z', expiresAt: '2026-11-01T00:00:00Z', features: [...featureIds], limits: Object.fromEntries(quotaKeys.map((key) => [key, key === 'sourceSeconds' ? 3600 : key === 'x_posts' ? 2 : 1])) };
-  await db.collection('subscriptionGrants').doc(uid).set(grant);
-  const readySource = async () => {
+  const grant = { status: 'active', startsAt: '2026-01-01T00:00:00Z', expiresAt: '2026-11-01T00:00:00Z', features: [...featureIds], limits: Object.fromEntries(quotaKeys.map((key) => [key, key === 'sourceSeconds' ? 3600 : key === 'x_posts' ? 2 : 1])) };
+  Object.assign(grant, await createDevelopmentAccess(db, uid, grant, Date.parse(grant.startsAt)));
+  const readySource = async (importedAt = now + 1) => {
     const id = randomUUID();
-    await intake.create({ uid, id, key: randomUUID(), input: { fileId: 'video-id' }, source: { fileId: 'video-id', name: 'video.mp4', mimeType: 'video/mp4', bytes: 9, durationSeconds: 60, requiresProbe: true }, now });
-    const claim = await intake.claim(`intake-${id}`, now, 1000) ?? await intake.claim(`intake-${id}`, now, 1000);
+    await intake.create({ uid, id, key: randomUUID(), input: { fileId: 'video-id' }, source: { fileId: 'video-id', name: 'video.mp4', mimeType: 'video/mp4', bytes: 9, durationSeconds: 60, requiresProbe: true }, now: importedAt - 1 });
+    const claim = await intake.claim(`intake-${id}`, importedAt - 1, 1000) ?? await intake.claim(`intake-${id}`, importedAt - 1, 1000);
     assert.ok(claim);
-    await intake.complete(claim, { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, id, claim.attempt) }, now + 1);
+    await intake.complete(claim, { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, id, claim.attempt) }, importedAt);
     // Legacy source-only fixture: this suite exercises the on-demand transcription lifecycle.
     await db.collection('accounts').doc(uid).collection('projects').doc(id).update({ preparation: FieldValue.delete() });
     return id;
@@ -582,12 +584,12 @@ test('saved retention deadlines survive grant changes and source expiry never qu
     const unprocessedId = await readySource();
     const sourceDeadline = (await intake.get(uid, id))!.sourceExpiresAt;
     const outputDeadline = (await store.outputs(uid, id, now + 7))[0]!.expiresAt;
-    assert.equal(sourceDeadline, now + 1 + 7 * 86_400_000);
-    assert.equal(outputDeadline, now + 6 + 30 * 86_400_000);
-    await db.collection('subscriptionGrants').doc(uid).set({ ...grant, expiresAt: '2026-12-01T00:00:00Z', limits: { ...grant.limits, sourceSeconds: 7200 } });
+    assert.equal(sourceDeadline, now + 1 + 60 * 86_400_000);
+    assert.equal(outputDeadline, Date.parse('2026-11-01T00:00:00Z') + 60 * 86_400_000);
+    await db.collection('subscriptionGrants').doc(uid).set({ ...grant, expiresAt: '2027-01-01T00:00:00Z', limits: { ...grant.limits, sourceSeconds: 7200 } });
     assert.equal((await intake.get(uid, id))!.sourceExpiresAt, sourceDeadline);
     assert.equal((await store.outputs(uid, id, now + 8))[0]!.expiresAt, outputDeadline);
-    const dayEight = now + 8 * 86_400_000;
+    const dayEight = now + 61 * 86_400_000;
     await assert.rejects(store.start(uid, unprocessedId, 'expired-generation-key', { x_posts: 1, linkedin_posts: 0 }, dayEight), { code: 'requires_reimport' });
     assert.equal(await store.batch(uid, unprocessedId), null);
     let imports = 0;
@@ -603,7 +605,7 @@ test('saved retention deadlines survive grant changes and source expiry never qu
     assert.equal((await store.outputs(uid, id, dayEight))[0]!.expiresAt, outputDeadline);
     assert.equal((await store.outputs(uid, id, outputDeadline - 1)).length, 1);
     assert.deepEqual(await store.outputs(uid, id, outputDeadline), []);
-    const dayThirtyOne = now + 31 * 86_400_000;
+    const dayThirtyOne = Date.parse('2026-11-01T00:00:00Z') + 61 * 86_400_000;
     await store.cleanup(dayThirtyOne);
     assert.deepEqual(await store.outputs(uid, id, dayThirtyOne), []);
   });
@@ -781,14 +783,14 @@ test('a mixed carousel batch consumes one carousel allowance and retains images 
     const another = await readySource();
     await assert.rejects(store.start(uid, another, 'another-carousel-key', { x_posts: 0, linkedin_posts: 0, carousels: 1 }, clock), { code: 'allowance_exceeded' });
     const cleanup = createGenerationStore(db, { remove: async (path) => { images.delete(path); } });
-    const dayEight = now + 8 * 86_400_000;
+    const dayEight = now + 61 * 86_400_000;
     await intake.remove(uid, id, dayEight, true);
     await cleanup.cleanup(dayEight);
     assert.equal(images.size, 5);
     assert.equal((await cleanup.output(uid, id, output.id, dayEight))!.assets!.length, 5);
-    await cleanup.cleanup(now + 31 * 86_400_000);
+    await cleanup.cleanup(Date.parse('2026-11-01T00:00:00Z') + 61 * 86_400_000);
     assert.equal(images.size, 0);
-    assert.equal(await cleanup.output(uid, id, output.id, now + 31 * 86_400_000), null);
+    assert.equal(await cleanup.output(uid, id, output.id, Date.parse('2026-11-01T00:00:00Z') + 61 * 86_400_000), null);
   });
 });
 
@@ -845,7 +847,7 @@ test('source expiry queues unfinished carousel images for cleanup without chargi
       renderCarousel: async (_plan, claim) => {
         images.add(assetPath(uid, id, claim.slot!.id, claim.attempt, 1));
         images.add(assetPath(uid, id, claim.slot!.id, claim.attempt, 2));
-        clock = now + 8 * 86_400_000;
+        clock = now + 61 * 86_400_000;
         await intake.remove(uid, id, clock, true);
         throw new GenerationError(502, 'carousel_render_failed', 'The source expired during rendering.');
       },
@@ -940,12 +942,12 @@ test('a mixed video batch consumes one video allowance and keeps its private ass
     const another = await readySource();
     await assert.rejects(store.start(uid, another, 'another-video-key', { x_posts: 0, linkedin_posts: 0, short_videos: 1 }, clock), { code: 'allowance_exceeded' });
     const cleanup = createGenerationStore(db, { remove: async (path) => { files.delete(path); } });
-    await intake.remove(uid, id, now + 8 * 86_400_000, true);
-    await cleanup.cleanup(now + 8 * 86_400_000);
+    await intake.remove(uid, id, now + 61 * 86_400_000, true);
+    await cleanup.cleanup(now + 61 * 86_400_000);
     assert.equal(files.size, 1);
-    await cleanup.cleanup(now + 31 * 86_400_000);
+    await cleanup.cleanup(Date.parse('2026-11-01T00:00:00Z') + 61 * 86_400_000);
     assert.equal(files.size, 0);
-    assert.equal(await cleanup.output(uid, id, output.id, now + 31 * 86_400_000), null);
+    assert.equal(await cleanup.output(uid, id, output.id, Date.parse('2026-11-01T00:00:00Z') + 61 * 86_400_000), null);
   });
 });
 
@@ -1005,7 +1007,7 @@ test('source expiry removes a video left by interrupted rendering without chargi
     const worker = createGenerationWorker({ store, now: () => clock,
       renderVideo: async (_plan, claim) => {
         files.add(videoPath(uid, id, claim.slot!.id, claim.attempt));
-        clock = now + 8 * 86_400_000;
+        clock = now + 61 * 86_400_000;
         await intake.remove(uid, id, clock, true);
         throw new GenerationError(502, 'video_render_failed', 'The source expired.');
       },
@@ -1029,38 +1031,27 @@ test('source expiry removes a video left by interrupted rendering without chargi
   });
 });
 
-test('retention is validated, snapshotted at admission and starts at successful completion', emulatorOnly, async () => {
+test('paid source retention is sixty days after successful import', emulatorOnly, async () => {
   await withStore(async ({ uid, db, intake, grant }) => {
-    const { isGrant, buildCapabilities } = await import('../../src/access/policy.js');
-    for (const days of [1, 7, 30] as const) {
-      assert.ok(isGrant({ ...grant, sourceRetentionDays: days }));
-      await db.collection('subscriptionGrants').doc(uid).set({ ...grant, sourceRetentionDays: days });
-      const id = randomUUID();
-      const created = await intake.create({ uid, id, key: randomUUID(), input: { fileId: 'video-id' }, source: { fileId: 'video-id', name: 'video.mp4', mimeType: 'video/mp4', bytes: 9, durationSeconds: 60, requiresProbe: true }, now });
-      assert.equal(created.sourceRetentionDays, days);
-      await db.collection('subscriptionGrants').doc(uid).update({ sourceRetentionDays: days === 30 ? 1 : 30 });
-      const claim = await intake.claim(`retention-${id}`, now + 100, 1000) ?? await intake.claim(`retention-${id}`, now + 100, 1000);
-      assert.ok(claim);
-      assert.equal(await intake.complete(claim, { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, id, claim.attempt) }, now + 200), true);
-      assert.equal((await intake.get(uid, id))!.sourceExpiresAt, now + 200 + days * 86_400_000);
-    }
-    for (const days of [0, 2, 31, '7', null]) assert.equal(isGrant({ ...grant, sourceRetentionDays: days }), false);
-    assert.equal(buildCapabilities({ ...grant, sourceRetentionDays: 1 }, new Date(now)).operationalLimits.sourceRetentionDays, 1);
+    const id = randomUUID();
+    await intake.create({ uid, id, key: randomUUID(), input: { fileId: 'video' }, source: { fileId: 'video', name: 'video.mp4', mimeType: 'video/mp4', bytes: 9, durationSeconds: 60, requiresProbe: true }, now });
+    const claim = (await intake.claim('retention-worker', now, 1000))!;
+    await intake.complete(claim, { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, id, claim.attempt) }, now + 1);
+    assert.equal((await intake.get(uid, id))!.sourceExpiresAt, now + 1 + 60 * 86_400_000);
   });
 });
 
 test('source cleanup preserves a running transcript-only claim and source accounting while cancelling video', emulatorOnly, async () => {
   await withStore(async ({ uid, db, intake, store, readySource }) => {
-    const id = await readySource();
+    const id = await readySource(now + 20 - 60 * 86_400_000);
     const ref = db.collection('accounts').doc(uid).collection('projects').doc(id);
-    await ref.update({ sourceExpiresAt: now + 20, sourceCleanupAt: now + 20 });
     await store.start(uid, id, 'independent-transcript-key', { x_posts: 1, linkedin_posts: 0, short_videos: 1 }, now + 2);
     const transcription = await store.claim('retention-worker', now + 3, 1000);
     assert.ok(transcription);
     await store.saveTranscript(transcription, result(transcript, 'deepgram'), now + 4);
     const saved = (await ref.collection('transcripts').doc('shared').get()).data()!;
     assert.equal(saved.createdAt, now + 4);
-    assert.equal(saved.expiresAt, now + 4 + 30 * 86_400_000);
+    assert.equal(saved.expiresAt, Date.parse('2026-11-01T00:00:00Z') + 60 * 86_400_000);
     const text = await store.claim('retention-worker', now + 5, 1000);
     assert.equal(text!.slot!.feature, 'x_posts');
     const paths: string[] = [];
@@ -1087,9 +1078,8 @@ test('source cleanup preserves a running transcript-only claim and source accoun
 
 test('timestamp cutoffs block media and transcription before cleanup and retain late costs', emulatorOnly, async () => {
   await withStore(async ({ uid, db, intake, store, readySource }) => {
-    const id = await readySource();
+    const id = await readySource(now + 20 - 60 * 86_400_000);
     const ref = db.collection('accounts').doc(uid).collection('projects').doc(id);
-    await ref.update({ sourceExpiresAt: now + 20, sourceCleanupAt: now + 20 });
     await store.start(uid, id, 'cutoff-transcription-key', { x_posts: 1, linkedin_posts: 0 }, now + 2);
     const claim = await store.claim('cutoff-worker', now + 3, 1000);
     assert.ok(claim);
@@ -1107,43 +1097,27 @@ test('timestamp cutoffs block media and transcription before cleanup and retain 
   });
 });
 
-test('expired transcripts invalidate claims and legacy expiry never slides with read time', emulatorOnly, async () => {
-  await withStore(async ({ uid, db, store, intake, readySource }) => {
+test('missing transcript retention never authorizes reading or result delivery', emulatorOnly, async () => {
+  await withStore(async ({ uid, db, store, readySource }) => {
     const id = await readySource();
-    const ref = db.collection('accounts').doc(uid).collection('projects').doc(id);
-    await store.start(uid, id, 'transcript-expiry-key', { x_posts: 1, linkedin_posts: 0 }, now + 2);
-    const transcription = await store.claim('transcript-worker', now + 3, 1000);
-    await store.saveTranscript(transcription!, result(transcript, 'deepgram'), now + 4);
-    const claim = await store.claim('transcript-worker', now + 5, 1000);
-    const saved = ref.collection('transcripts').doc('shared');
-    await saved.update({ expiresAt: now + 20, cleanupAt: now + 20 });
-    assert.deepEqual(await store.transcript(uid, id, now + 19), transcript);
-    assert.equal(await store.transcript(uid, id, now + 20), null);
-    assert.equal(await store.markProviderInvoked(claim!, { provider: 'anthropic', model: 'test', rates: null }, now + 20), false);
-    assert.equal(await store.renew(claim!, now + 20, 1000), false);
-    assert.equal(await store.saveOutput(claim!, { ...result('A late post.'), usage: { ...unknownUsage(), outputTokens: 20 } }, now + 20), false);
-    await store.cleanup(now + 20);
-    assert.equal((await saved.get()).exists, false);
-    await store.claim('after-transcript-cutoff', now + 1006, 1000);
-    assert.equal((await store.batch(uid, id))!.status, 'failed');
-    assert.equal((await intake.usage(uid, now + 1006) as any).reserved.x_posts, 0);
-    await saved.set(transcript);
-    const expiry = now + 2 + 30 * 86_400_000;
-    assert.deepEqual(await store.transcript(uid, id, expiry - 1), transcript);
-    assert.equal(await store.transcript(uid, id, expiry), null);
-    await store.cleanup(expiry - 1);
-    assert.equal((await saved.get()).data()!.expiresAt, expiry);
-    await store.cleanup(expiry);
-    assert.equal((await saved.get()).exists, false);
+    await store.start(uid, id, 'transcript-authority-key', { x_posts: 1, linkedin_posts: 0 }, now + 2);
+    await store.saveTranscript((await store.claim('worker', now + 3, 1000))!, result(transcript, 'deepgram'), now + 4);
+    const claim = (await store.claim('worker', now + 5, 1000))!;
+    const saved = db.collection('accounts').doc(uid).collection('projects').doc(id).collection('transcripts').doc('shared');
+    await saved.update({ retention: FieldValue.delete() });
+    assert.equal(await store.transcript(uid, id, now + 6), null);
+    assert.equal(await store.markProviderInvoked(claim, { provider: 'anthropic', model: 'test', rates: null }, now + 6), false);
+    assert.equal(await store.renew(claim, now + 6, 1000), false);
+    assert.equal(await store.saveOutput(claim, result('A late post.'), now + 6), false);
+    assert.equal((await saved.get()).data()!.retention, undefined);
   });
 });
 
 test('live carousel rendering survives source cleanup and keeps its delivered images', emulatorOnly, async () => {
   await withStore(async ({ uid, db, store, intake, readySource }) => {
-    const id = await readySource();
+    const id = await readySource(now + 60_000 - 60 * 86_400_000);
     // Real SDK awaits need headroom; policy time advances explicitly inside renderCarousel.
     const sourceExpiry = now + 60_000;
-    await db.collection('accounts').doc(uid).collection('projects').doc(id).update({ sourceExpiresAt: sourceExpiry, sourceCleanupAt: sourceExpiry });
     await store.start(uid, id, 'carousel-source-independent-key', { x_posts: 0, linkedin_posts: 0, carousels: 1 }, now + 2);
     let clock = now + 3;
     const images = new Set<string>();
@@ -1175,8 +1149,7 @@ test('live carousel rendering survives source cleanup and keeps its delivered im
 
 test('video provider admission and result delivery stop exactly at source expiry without cleanup', emulatorOnly, async () => {
   await withStore(async ({ uid, db, store, readySource }) => {
-    const id = await readySource();
-    await db.collection('accounts').doc(uid).collection('projects').doc(id).update({ sourceExpiresAt: now + 20, sourceCleanupAt: now + 20 });
+    const id = await readySource(now + 20 - 60 * 86_400_000);
     await store.start(uid, id, 'video-timestamp-cutoff-key', { x_posts: 0, linkedin_posts: 0, short_videos: 1 }, now + 2);
     const transcription = await store.claim('video-cutoff-worker', now + 3, 1000);
     await store.saveTranscript(transcription!, result(videoTranscript, 'deepgram'), now + 4);
@@ -1246,13 +1219,12 @@ test('repeat batches preserve legacy results, request replay, distinct jobs and 
 
 test('expired source permits transcript-only repeat generation and refuses clips before any paid work', emulatorOnly, async () => {
   await withStore(async ({ uid, db, store, intake, grant, readySource }) => {
-    const id = await readySource();
+    const id = await readySource(now + 10 - 60 * 86_400_000);
     await db.collection('subscriptionGrants').doc(uid).set({ ...grant, limits: { ...grant.limits, x_posts: 5, carousels: 2 } });
     const first = await store.start(uid, id, 'source-expiry-first', { x_posts: 1, linkedin_posts: 0 }, now + 2);
     await store.saveTranscript((await store.claim('worker', now + 3, 1000))!, result(transcript, 'deepgram'), now + 4);
     await store.saveOutput((await store.claim('worker', now + 5, 1000))!, result('Delivered before source expiry.'), now + 6);
     const ref = db.collection('accounts').doc(uid).collection('projects').doc(id);
-    await ref.update({ sourceExpiresAt: now + 10 });
     await intake.remove(uid, id, now + 11, true);
     const availability = await store.availability!(uid, id, now + 11);
     assert.deepEqual(availability.access, { active: true, reason: 'active', expiresAt: grant.expiresAt });
@@ -1279,9 +1251,9 @@ test('expired source permits transcript-only repeat generation and refuses clips
     assert.equal((await intake.usage(uid, now + 14) as any).consumed.sourceSeconds, 60);
     assert.equal((await store.outputs(uid, id, now + 14)).length, 2);
     assert.equal((await store.output(uid, id, first.slots[0]!.id, now + 14))!.text, 'Delivered before source expiry.');
-    assert.equal((await ref.collection('transcripts').doc('shared').get()).data()!.expiresAt, now + 4 + 30 * 86_400_000);
-    await ref.collection('transcripts').doc('shared').update({ expiresAt: now + 15 });
-    await assert.rejects(store.start(uid, id, 'expired-both-repeat', { x_posts: 1, linkedin_posts: 0 }, now + 16), { code: 'requires_reimport' });
+    assert.equal((await ref.collection('transcripts').doc('shared').get()).data()!.expiresAt, Date.parse('2026-11-01T00:00:00Z') + 60 * 86_400_000);
+    await ref.collection('transcripts').doc('shared').delete();
+    await assert.rejects(store.start(uid, id, 'missing-transcript-repeat', { x_posts: 1, linkedin_posts: 0 }, now + 16), { code: 'requires_reimport' });
     assert.equal((await store.availability!(uid, id, now + 16)).outputs.carousels.reason, 'requires_reimport');
   });
 });
@@ -1377,14 +1349,13 @@ test('cleanup revisits known abandoned imports after their upload deadline witho
 for (const invalidRetention of [false, true]) {
   test(`restoration cannot resurrect a legacy transcript after batch replacement or ASR failure${invalidRetention ? ' with invalid retention' : ''}`, emulatorOnly, async () => {
     await withStore(async ({ uid, db, intake, store, readySource }) => {
-      const id = await readySource();
+      const id = await readySource(now + 2 - 60 * 86_400_000);
       const ref = db.collection('accounts').doc(uid).collection('projects').doc(id);
       const priorCreatedAt = now - 31 * 86_400_000;
       const oldTranscript = { ...transcript, ...(invalidRetention ? { retention: { version: 999, kind: 'trial', startsAt: now } } : {}) };
       await ref.collection('transcripts').doc('shared').set(oldTranscript);
       await ref.collection('generation').doc('batch').set({ id: 'old-batch', keyHash: 'old-request', fingerprint: 'old-fingerprint', uid, projectId: id, status: 'failed', slots: [], createdAt: priorCreatedAt, updatedAt: priorCreatedAt, deadline: priorCreatedAt + 1000, transcriptReady: true, transcriptionAttempts: 1 });
-      await ref.update({ sourceExpiresAt: now + 2 });
-      assert.equal(await store.transcript(uid, id, now + 3), null);
+        assert.equal(await store.transcript(uid, id, now + 3), null);
       const expired = (await intake.get(uid, id))!;
       await intake.retry({ intent: 'source_restore', uid, id, key: 'restore-legacy-cache', source: expired.source, attempts: expired.attempts, updatedAt: expired.updatedAt, now: now + 3 });
       const restore = (await intake.claim('restore-worker', now + 4, 1000))!;
@@ -1393,8 +1364,7 @@ for (const invalidRetention of [false, true]) {
       assert.equal(first.transcriptReady, false);
       assert.equal(await store.transcript(uid, id, now + 7), null);
       const saved = (await ref.collection('transcripts').doc('shared').get()).data()!;
-      if (invalidRetention) assert.deepEqual(saved, oldTranscript);
-      else assert.equal(saved.expiresAt, priorCreatedAt + 30 * 86_400_000);
+      assert.deepEqual(saved, oldTranscript);
       const asr = (await store.claim('asr-worker', now + 7, 1000))!;
       assert.equal(asr.stage, 'transcribe');
       await store.fail(asr, { code: 'transcription_failed', retryable: false, usage: unknownUsage(), provider: 'fixture', model: 'fixture', rates: null }, now + 8);

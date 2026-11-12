@@ -3,7 +3,7 @@ import { createId } from '../shared/id.js';
 import { ProjectError, type ProjectStore, type JobClaim, type ImportResult, type ImportProgress } from './service.js';
 import { SourceImportError, sourceAttemptPaths } from './source.js';
 import { traceWorkerAwait } from '../worker-trace.js';
-import { workerEvent } from '../worker-health.js';
+import { safeWorkerCode, workerEvent } from '../worker-health.js';
 
 export function createIntakeWorker({ store, importSource, deleteSource, now = Date.now, workerId = createId(), leaseMilliseconds = 60_000 }: {
   store: ProjectStore;
@@ -110,10 +110,12 @@ export function createIntakeWorker({ store, importSource, deleteSource, now = Da
     },
     async cleanup() {
       for (const expired of await store.expiredSources(now())) {
-        // Invalidate pending work before removing any file it could still refer to.
-        const path = await store.remove(expired.uid, expired.id, now(), true, expired);
-        if (path === undefined) continue;
-        // Physical deletion is durable and leased through the shared storage queue.
+        try {
+          // Invalidate pending work before queuing physical deletion.
+          await store.remove(expired.uid, expired.id, now(), true, expired);
+        } catch (error) {
+          workerEvent('cleanup.failed', { projectId: expired.id, phase: 'source', code: safeWorkerCode(error) }, 'error');
+        }
       }
     },
   };

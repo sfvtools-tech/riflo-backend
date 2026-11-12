@@ -24,7 +24,7 @@ async function fixture(run: (value: { db: ReturnType<typeof getFirestore>; abuse
   const db = getFirestore(app);
   const identities: RequestIdentity[] = [];
   const add = (value = identity()) => { identities.push(value); return value; };
-  try { await run({ db, abuse: createTrialAbuseStore(db, key), lifecycle: createLifecycleStore(db, { retentionEnabled: true }), identities, add }); }
+  try { await run({ db, abuse: createTrialAbuseStore(db, key), lifecycle: createLifecycleStore(db, {}), identities, add }); }
   finally {
     for (const item of identities) {
       const subject = trialSubjectKey(item, key);

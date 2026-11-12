@@ -19,7 +19,7 @@ for (const mode of ['original', 'retry'] as const) {
     const account = db.collection('accounts').doc(uid);
     const store = createProjectStore(db);
     let clock = start;
-    const lifecycle = createLifecycleStore(db, { retentionEnabled: true, now: () => clock });
+    const lifecycle = createLifecycleStore(db, { now: () => clock });
     const input = { fileId: 'fixture-source' };
     const source = { fileId: input.fileId, name: 'Private source', mimeType: 'video/mp4', bytes: 9, durationSeconds: 30, requiresProbe: true };
     const service = createProjectService({ store, now: () => clock, validateSource: async () => source });

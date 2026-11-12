@@ -1,3 +1,4 @@
+import { createDevelopmentAccess } from '../../src/access/development-access.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
@@ -42,24 +43,24 @@ async function setup(credits: number) {
   const db = getFirestore(app);
   const account = db.collection('accounts').doc(uid);
   const grantRef = db.collection('subscriptionGrants').doc(uid);
-  const grant = planGrant('lower', randomUUID(), new Date(now - 1000).toISOString(), new Date(now + 1_000_000).toISOString());
+  const grant = planGrant('lower', randomUUID(), new Date(now - 90 * 86_400_000).toISOString(), new Date(now + 1_000_000).toISOString());
   grant.limits.creationCredits = credits;
-  await grantRef.set(grant);
+  Object.assign(grant, await createDevelopmentAccess(db, uid, grant, Date.parse(grant.startsAt)));
   const imports = createProjectStore(db);
   const generations = createGenerationStore(db);
   const usage = account.collection('allowances').doc(grantPeriod(grant));
-  const imported = async () => {
-    const project = await imports.create({ uid, id: randomUUID(), key: randomUUID(), now, input: { fileId: 'source-file' }, source: { fileId: 'source-file', name: 'source.mp4', mimeType: 'video/mp4', bytes: 9, durationSeconds: 30, requiresProbe: true } });
-    const claim = await imports.claim('importer', now + 1, 1000) ?? await imports.claim('importer', now + 1, 1000);
+  const imported = async (importedAt = now + 2) => {
+    const project = await imports.create({ uid, id: randomUUID(), key: randomUUID(), now: importedAt - 2, input: { fileId: 'source-file' }, source: { fileId: 'source-file', name: 'source.mp4', mimeType: 'video/mp4', bytes: 9, durationSeconds: 30, requiresProbe: true } });
+    const claim = await imports.claim('importer', importedAt - 1, 1000) ?? await imports.claim('importer', importedAt - 1, 1000);
     assert.ok(claim);
     assert.equal(claim.project.id, project.id);
-    await imports.complete(claim, { bytes: 9, durationSeconds: 30, storagePath: sourcePath(uid, project.id, claim.attempt) }, now + 2);
+    await imports.complete(claim, { bytes: 9, durationSeconds: 30, storagePath: sourcePath(uid, project.id, claim.attempt) }, importedAt);
     // Legacy source-only fixture: these tests retain first-generation ASR accounting coverage.
     await account.collection('projects').doc(project.id).update({ preparation: FieldValue.delete() });
     return project.id;
   };
-  const accepted = async (selection: Selection = { x_posts: 1, linkedin_posts: 0 }) => {
-    const id = await imported();
+  const accepted = async (selection: Selection = { x_posts: 1, linkedin_posts: 0 }, importedAt = now + 2) => {
+    const id = await imported(importedAt);
     const key = randomUUID();
     const batch = await generations.start(uid, id, key, selection, now + 3);
     const claim = await generations.claim('transcriber', now + 4, 1000);
@@ -256,8 +257,7 @@ test('deletion with source period A and batch period B releases owning ledger an
 
 test('source expiry releases only pending videos while cached-transcript text settles', local, async () => {
   await withAccount(async ({ uid, account, imports, generations, usage, accepted }) => {
-    const { id } = await accepted({ x_posts: 1, linkedin_posts: 0, short_videos: 1 });
-    await account.collection('projects').doc(id).update({ sourceExpiresAt: now + 6 });
+    const { id } = await accepted({ x_posts: 1, linkedin_posts: 0, short_videos: 1 }, now + 6 - 60 * 86_400_000);
     await imports.remove(uid, id, now + 6, true);
     assert.equal((await usage.get()).data()!.reserved.creationCredits, 1);
     const claim = (await generations.claim('text-worker', now + 7, 1000))!;
@@ -306,7 +306,7 @@ test('revocation, transcription failure, batch deadline and exhausted attempts r
 test('pending legacy and shared batches retain their original meter across grant mode switches', local, async () => {
   for (const originalMode of ['legacy', 'shared']) {
     await withAccount(async ({ uid, grant, grantRef, account, generations, accepted }) => {
-      const legacy = { status: 'active' as const, startsAt: grant.startsAt, expiresAt: grant.expiresAt, features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, key === 'sourceSeconds' ? 1000 : 10])) as import('../../src/access/policy.js').LegacyGrant['limits'] };
+      const legacy = { retention: grant.retention, status: 'active' as const, startsAt: grant.startsAt, expiresAt: grant.expiresAt, features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, key === 'sourceSeconds' ? 1000 : 10])) as import('../../src/access/policy.js').LegacyGrant['limits'] };
       const original = originalMode === 'legacy' ? legacy : grant;
       await grantRef.set(original);
       const { id, batch, key } = await accepted();

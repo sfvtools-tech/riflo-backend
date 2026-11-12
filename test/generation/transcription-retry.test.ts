@@ -1,3 +1,5 @@
+import { sourceDeadline } from '../helpers/retention.js';
+import { createDevelopmentAccess } from '../../src/access/development-access.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -27,21 +29,22 @@ const transcript: Transcript = { text: 'A practical thought.', words: [{ text: '
 const result = <T>(value: T): AttemptResult<T> => ({ value, usage: { ...unknownUsage(), seconds: 60 }, provider: 'deepgram', model: 'fixture', rates: { model: 'fixture', capturedAt: new Date(now).toISOString(), inputMicrosPerMillion: null, outputMicrosPerMillion: null, cacheReadMicrosPerMillion: null, cacheWriteMicrosPerMillion: null, transcriptionMicrosPerMinute: 5200 }, promptVersion: null });
 
 test('transcription retry eligibility distinguishes source, failure, access and completed transcript', () => {
-  const project = { status: 'source_ready', storagePath: 'stored', sourceExpiresAt: now + 1000 } as Project;
-  assert.equal(transcriptionAvailability(project, undefined, false, true, now).reason, 'transcription_not_failed');
-  assert.equal(transcriptionAvailability(project, undefined, false, false, now).reason, 'subscription_required');
-  assert.equal(transcriptionAvailability(project, undefined, false, true, now + 1000).reason, 'requires_reimport');
-  assert.equal(transcriptionAvailability(project, undefined, true, true, now).reason, 'transcript_ready');
+  const context = { uid: 'trial-owner', promotion: null, tenures: new Map() };
+  const project = { status: 'source_ready', storagePath: 'stored', ...sourceDeadline(now + 1000) } as Project;
+  assert.equal(transcriptionAvailability(project, undefined, false, true, now, context).reason, 'transcription_not_failed');
+  assert.equal(transcriptionAvailability(project, undefined, false, false, now, context).reason, 'subscription_required');
+  assert.equal(transcriptionAvailability(project, undefined, false, true, now + 1000, context).reason, 'requires_reimport');
+  assert.equal(transcriptionAvailability(project, undefined, true, true, now, context).reason, 'transcript_ready');
   assert.equal(rejectsTranscriptionSource('audio_too_large'), true);
   assert.equal(rejectsTranscriptionSource('invalid_transcript', { reason: 'empty_text', field: 'text' }), true);
   assert.equal(rejectsTranscriptionSource('invalid_transcript', { reason: 'invalid_shape', field: 'transcript' }), false);
   assert.equal(rejectsTranscriptionSource('transcription_failed'), false);
   for (const [code, expected] of [['transcription_configuration_failed', true], ['transcription_failed', true], ['invalid_transcript', false], ['audio_too_large', false]] as const) {
     const batch = { status: 'failed', transcriptionAttempts: 1, transcriptReady: false, errorCode: code, transcriptionFailure: { code, retryable: false } } as Parameters<typeof transcriptionAvailability>[1];
-    assert.equal(transcriptionAvailability(project, batch, false, true, now).retryAvailable, expected, code);
+    assert.equal(transcriptionAvailability(project, batch, false, true, now, context).retryAvailable, expected, code);
   }
   const legacy = { status: 'failed', transcriptionAttempts: 1, transcriptReady: false, errorCode: 'transcription_failed' } as Parameters<typeof transcriptionAvailability>[1];
-  assert.equal(transcriptionAvailability(project, legacy, false, true, now).retryAvailable, true);
+  assert.equal(transcriptionAvailability(project, legacy, false, true, now, context).retryAvailable, true);
 });
 
 async function withStore(run: (context: Awaited<ReturnType<typeof setup>>) => Promise<void>) {
@@ -66,7 +69,7 @@ async function setup() {
   const account = db.collection('accounts').doc(uid);
   const grantRef = db.collection('subscriptionGrants').doc(uid);
   const grant: Grant = { status: 'active', startsAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 3_600_000).toISOString(), features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, key === 'sourceSeconds' ? 60 : 2])) as Grant['limits'] };
-  await grantRef.set(grant);
+  Object.assign(grant, await createDevelopmentAccess(db, uid, grant, now));
   const intake = createProjectStore(db);
   const store = createGenerationStore(db);
   let clock = now;
@@ -157,7 +160,7 @@ test('manual retry failures stop after one attempt and retain paid usage without
 });
 
 test('retry requires ownership, active access, a retryable failure and an unexpired source', emulatorOnly, async () => {
-  await withStore(async ({ uid, account, store, service, grantRef, project, failedTranscript, clock }) => {
+  await withStore(async ({ uid, account, store, service, grantRef, project, failedTranscript, clock, advance }) => {
     await assert.rejects(service.retryTranscription(uid, project.id, 'before-first-attempt'), { code: 'transcription_not_failed' });
     await failedTranscript(false);
     assert.equal((await store.availability!(uid, project.id, clock())).transcription!.reason, 'transcription_not_retryable');
@@ -168,7 +171,7 @@ test('retry requires ownership, active access, a retryable failure and an unexpi
     await account.collection('projects').doc(project.id).collection('generation').doc('batch').update({ transcriptionFailure: { code: 'transcription_unavailable', retryable: true } });
     await grantRef.delete();
     await assert.rejects(service.retryTranscription(uid, project.id, 'no-access-key'), { code: 'subscription_required' });
-    await account.collection('projects').doc(project.id).update({ sourceExpiresAt: clock() });
+    advance(61 * 86_400_000);
     assert.equal((await store.availability!(uid, project.id, clock())).transcription!.reason, 'requires_reimport');
     await assert.rejects(service.retryTranscription(uid, project.id, 'expired-source-key'), { code: 'requires_reimport' });
   });
@@ -233,7 +236,7 @@ test('legacy cached transcripts cannot bypass an unconsumed source reservation',
     const usageRef = account.collection('allowances').doc(saved.period);
     await projectRef.update({ sourceAllowanceConsumed: false, reservedSourceSeconds: 0 });
     await usageRef.update({ 'consumed.sourceSeconds': 0, 'reserved.sourceSeconds': 0 });
-    await projectRef.collection('transcripts').doc('shared').set({ ...transcript, createdAt: clock(), expiresAt: clock() + 100_000 });
+    await projectRef.collection('transcripts').doc('shared').set({ ...transcript, createdAt: clock(), expiresAt: Date.parse(grant.expiresAt) + 60 * 86_400_000, retention: { version: 1, kind: 'paid', tenureId: grant.retention!.paidTenureId!, promisedUntil: Date.parse(grant.expiresAt) + 60 * 86_400_000 } });
     await grantRef.update({ 'limits.sourceSeconds': 0 });
     assert.equal((await store.availability!(uid, project.id, clock())).outputs.x_posts.reason, 'allowance_exceeded');
     await assert.rejects(store.start(uid, project.id, 'legacy-no-allowance', { x_posts: 1, linkedin_posts: 0 }, clock()), { code: 'allowance_exceeded' });
@@ -252,7 +255,7 @@ test('legacy cached transcripts cannot bypass an unconsumed source reservation',
 });
 
 test('revoked access cancels a queued transcription-only batch without invoking a provider', emulatorOnly, async () => {
-  await withStore(async ({ uid, intake, store, service, grantRef, project, failedTranscript, clock }) => {
+  await withStore(async ({ uid, intake, store, service, grantRef, project, failedTranscript, clock, advance }) => {
     await failedTranscript();
     await service.retryTranscription(uid, project.id, 'revoked-manual-retry');
     const before = await intake.usage(uid, clock());
@@ -289,7 +292,7 @@ test('ready transcription retry preserves legacy delivery accounting before anot
 });
 
 test('provider configuration failures do not permanently reject the source and a live transcript remains usable', emulatorOnly, async () => {
-  await withStore(async ({ uid, account, store, service, project, failedTranscript, clock, advance }) => {
+  await withStore(async ({ uid, account, store, service, project, grant, failedTranscript, clock, advance }) => {
     await failedTranscript(false);
     const batchRef = account.collection('projects').doc(project.id).collection('generation').doc('batch');
     await batchRef.update({ transcriptionFailure: { code: 'transcription_failed', retryable: false }, errorCode: 'transcription_failed' });
@@ -306,7 +309,7 @@ test('provider configuration failures do not permanently reject the source and a
     assert.ok(claim);
     assert.equal(claim.stage, 'transcribe');
     await store.fail(claim, { code: 'audio_too_large', retryable: false, provider: 'fixture', model: 'fixture', usage: unknownUsage(), rates: null }, advance());
-    await account.collection('projects').doc(project.id).collection('transcripts').doc('shared').set({ ...transcript, createdAt: clock(), expiresAt: clock() + 100_000 });
+    await account.collection('projects').doc(project.id).collection('transcripts').doc('shared').set({ ...transcript, createdAt: clock(), expiresAt: Date.parse(grant.expiresAt) + 60 * 86_400_000, retention: { version: 1, kind: 'paid', tenureId: grant.retention!.paidTenureId!, promisedUntil: Date.parse(grant.expiresAt) + 60 * 86_400_000 } });
     assert.equal((await store.availability!(uid, project.id, clock())).outputs.x_posts.available, true);
     const cached = await store.start(uid, project.id, 'valid-cached-transcript', { x_posts: 1, linkedin_posts: 0 }, advance());
     assert.equal(cached.transcriptReady, true);

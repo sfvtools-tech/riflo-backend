@@ -2,6 +2,7 @@ import { legacySourceLimits, type SourceLimits } from '../access/source-limits.j
 import type { CreditAccounting } from '../access/accounting.js';
 import type { Allocation } from '../access/funding.js';
 import type { RequestIdentity } from '../access/trial-abuse.js';
+import { isRetentionPolicy } from '../access/retention.js';
 import { operationalLimits } from '../access/policy.js';
 import { createId } from '../shared/id.js';
 import type { RetentionOrigin, RetentionPolicy } from '../generation/retention.js';
@@ -31,7 +32,6 @@ export type Project = {
   retentionOrigin?: RetentionOrigin;
   sourceRetention?: RetentionPolicy;
   sourceCleanupAt?: number | null;
-  dedupVersion?: 1;
   sourceFunding?: Allocation[];
   accounting?: CreditAccounting;
   importOperationId?: string;
@@ -39,7 +39,6 @@ export type Project = {
   input: SourceInput; source: SourceDetails; createdAt: number; updatedAt: number;
   deadline: number; sourceExpiresAt: number | null; storagePath: string | null;
   retryAvailableAt?: number | null;
-  sourceRetentionDays?: 1 | 7 | 30;
   sourceAllowanceLimit?: number;
   sourceAllowanceConsumed?: boolean; attempts: number; errorCode: string | null; period: string; reservedSourceSeconds: number;
 };
@@ -63,7 +62,6 @@ export type ProjectStore = {
   checkpointSource?: (claim: JobClaim, result: ImportResult, now: number) => Promise<boolean>;
   fail: (claim: JobClaim, failure: { code: string; retryable: boolean; bytes: number }, now: number) => Promise<boolean>;
   expiredSources: (now: number) => Promise<SourceCleanup[]>;
-  finishCleanup: (uid: string, id: string, now: number, expected: SourceCleanup) => Promise<void>;
 };
 
 export type PublicSource = {
@@ -105,7 +103,8 @@ export function publicProject(project: Project, now = Date.now(), allowance?: { 
 export type PublicProject = ReturnType<typeof publicProject>;
 
 export function restorableSource(project: Project, now: number) {
-  return project.status === 'source_expired' || (project.status === 'source_ready' && project.sourceExpiresAt !== null && project.sourceExpiresAt <= now) || (project.status === 'failed' && project.importIntent === 'source_restore');
+  if (project.status === 'failed' && project.importIntent === 'source_restore') return true;
+  return isRetentionPolicy(project.sourceRetention) && project.sourceExpiresAt !== null && (project.status === 'source_expired' || (project.status === 'source_ready' && project.sourceExpiresAt !== null && project.sourceExpiresAt <= now));
 }
 
 export function createProjectService({ store, validateSource, startTrial, beforeValidateSource, now = Date.now }: {

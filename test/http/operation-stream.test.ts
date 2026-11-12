@@ -52,7 +52,7 @@ function fixture() {
     get: async (uid, id) => own(uid, id) ? projects.get(id)! : null,
     list: async uid => [...projects.values()].filter(project => project.uid === uid),
     usage: async () => ({ limits: { sourceSeconds: 1800 }, reserved: { sourceSeconds: 60 }, consumed: { sourceSeconds: 0 }, remaining: { sourceSeconds: 1740 } }),
-    remove: unused, claim: unused, renew: unused, complete: unused, fail: unused, expiredSources: unused, finishCleanup: unused,
+    remove: unused, claim: unused, renew: unused, complete: unused, fail: unused, expiredSources: unused,
   };
   const generationStore: GenerationStore = {
     lookup: async (uid, id, key, selection) => {
@@ -190,6 +190,7 @@ test('every streaming command reserves before new work while accepted replays ac
       if (kind === 'retry-import' || kind === 'restore-source') {
         const project = f.projects.get(base.id)!;
         project.status = kind === 'retry-import' ? 'failed' : 'source_expired';
+        project.sourceRetention = { kind: 'trial', startsAt: now - 15 * 86_400_000, version: 1, promisedUntil: now - 86_400_000 };
         project.retryAvailableAt = now;
       }
       const path = kind === 'create' ? '/v1/projects' : `/v1/projects/${base.id}/${kind}`;

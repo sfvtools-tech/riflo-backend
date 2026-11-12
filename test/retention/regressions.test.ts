@@ -1,3 +1,5 @@
+import { createLifecycleStore } from '../../src/access/lifecycle-firestore.js';
+import { createDevelopmentAccess } from '../../src/access/development-access.js';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -69,10 +71,11 @@ test('fifty failing asset deletions do not starve a later deletable entry across
 
 test('fifty failing source deletions do not starve a later expired source across cleanup passes', emulator, async () => {
   await withDatabase(async ({ db, uid }) => {
+    await createLifecycleStore(db).startTrial(uid, now - 15 * 86_400_000);
     const write = db.batch();
     for (let index = 0; index <= 50; index++) {
       const id = index === 50 ? 'deletable' : `blocked-${index}`;
-      const project: Project = { id, uid, input: { fileId: 'fixture-video' }, source: { fileId: 'fixture-video', name: 'Video', mimeType: 'video/mp4', bytes: 9, durationSeconds: 10, requiresProbe: false }, status: 'source_ready', attempts: 0, storagePath: sourcePath(uid, index === 50 ? 'deletable' : `blocked-${index}`, 1, 'mp4'), createdAt: now - 1000, updatedAt: now - 1000, deadline: now, sourceExpiresAt: index === 50 ? now - 1 : now - 2, errorCode: null, period: 'fixture-period', reservedSourceSeconds: 0 };
+      const project: Project = { id, uid, input: { fileId: 'fixture-video' }, source: { fileId: 'fixture-video', name: 'Video', mimeType: 'video/mp4', bytes: 9, durationSeconds: 10, requiresProbe: false }, status: 'source_ready', attempts: 0, storagePath: sourcePath(uid, index === 50 ? 'deletable' : `blocked-${index}`, 1, 'mp4'), createdAt: now - 1000, updatedAt: now - 1000, deadline: now, sourceExpiresAt: index === 50 ? now - 1 : now - 2, sourceCleanupAt: now - 1, sourceRetention: { version: 1, kind: 'trial', startsAt: now - 15 * 86_400_000, promisedUntil: index === 50 ? now - 1 : now - 2 }, errorCode: null, period: 'fixture-period', reservedSourceSeconds: 0 };
       write.set(db.collection('accounts').doc(uid).collection('projects').doc(id), project);
     }
     await write.commit();
@@ -93,8 +96,9 @@ test('fifty failing source deletions do not starve a later expired source across
 test('newly discovered expired sources behind the cursor are reached while failed cleanup keeps retrying', emulator, async () => {
   await withDatabase(async ({ db, uid }) => {
     let clock = now;
+    await createLifecycleStore(db).startTrial(uid, now - 15 * 86_400_000);
     const projects = db.collection('accounts').doc(uid).collection('projects');
-    const expired = (id: string, storagePath: string, sourceExpiresAt: number): Project => ({ id, uid, input: { fileId: 'fixture-video' }, source: { fileId: 'fixture-video', name: 'Video', mimeType: 'video/mp4', bytes: 9, durationSeconds: 10, requiresProbe: false }, status: 'source_ready', attempts: 0, storagePath, createdAt: now - 1000, updatedAt: now - 1000, deadline: now, sourceExpiresAt, errorCode: null, period: 'fixture-period', reservedSourceSeconds: 0 });
+    const expired = (id: string, storagePath: string, sourceExpiresAt: number): Project => ({ id, uid, input: { fileId: 'fixture-video' }, source: { fileId: 'fixture-video', name: 'Video', mimeType: 'video/mp4', bytes: 9, durationSeconds: 10, requiresProbe: false }, status: 'source_ready', attempts: 0, storagePath, createdAt: now - 1000, updatedAt: now - 1000, deadline: now, sourceExpiresAt, sourceCleanupAt: sourceExpiresAt, sourceRetention: { version: 1, kind: 'trial', startsAt: now - 15 * 86_400_000, promisedUntil: sourceExpiresAt }, errorCode: null, period: 'fixture-period', reservedSourceSeconds: 0 });
     const write = db.batch();
     for (let index = 0; index < 50; index++) write.set(projects.doc(`blocked-${index}`), expired(`blocked-${index}`, sourcePath(uid, `blocked-${index}`, 1, 'mp4'), now - 100));
     await write.commit();
@@ -114,7 +118,7 @@ test('newly discovered expired sources behind the cursor are reached while faile
 
 test('cleanup preserves a permanent import failure while removing abandoned source files', emulator, async () => {
   await withDatabase(async ({ db, uid }) => {
-    await db.collection('subscriptionGrants').doc(uid).set({ status: 'active', startsAt: '2026-10-01T00:00:00Z', expiresAt: '2026-11-01T00:00:00Z', features: [...featureIds], limits: Object.fromEntries(quotaKeys.map((key) => [key, 1800])) });
+    await createDevelopmentAccess(db, uid, { status: 'active', startsAt: '2026-10-01T00:00:00Z', expiresAt: '2026-11-01T00:00:00Z', features: [...featureIds], limits: Object.fromEntries(quotaKeys.map((key) => [key, 1800])) }, now);
     const store = createProjectStore(db);
     const project = await store.create({ uid, id: randomUUID(), key: 'failed-import-key', now, input: { fileId: 'fixture-video' }, source: { fileId: 'fixture-video', name: 'Video', mimeType: 'video/mp4', bytes: 9, durationSeconds: 10, requiresProbe: true } });
     const claim = await store.claim('fixture-worker', now, 1000);
@@ -145,7 +149,7 @@ test('user deletion purges more than one page of every private child collection 
   await withDatabase(async ({ db, uid }) => {
     const ref = db.collection('accounts').doc(uid).collection('projects').doc('bounded-purge');
     await ref.set({ uid, id: ref.id, status: 'deleted', payloadCleanupPending: true, input: { fileId: 'private-source-id' } });
-    const kinds = ['outputs', 'transcripts', 'generation', 'generationRequests', 'retentionDeletions', 'maintenance'];
+    const kinds = ['outputs', 'transcripts', 'generation', 'generationRequests'];
     const write = db.batch();
     for (const kind of kinds) for (let index = 0; index < 61; index++) write.set(ref.collection(kind).doc(String(index)), { privatePayload: 'must be removed', cleanupAt: null, snapshotCleanupAt: null });
     await write.commit();
@@ -157,5 +161,69 @@ test('user deletion purges more than one page of every private child collection 
     for (const kind of kinds) assert.equal((await ref.collection(kind).get()).empty, true);
     await store.cleanup(now + 2);
     assert.equal((await ref.get()).exists, false);
+  });
+});
+
+
+test('failed logical cleanup advances past a full page and still runs other cleanup stages', emulator, async () => {
+  await withDatabase(async ({ db, uid }) => {
+    const day = 86_400_000;
+    await createLifecycleStore(db).startTrial(uid, now - 31 * day);
+    const project = db.collection('accounts').doc(uid).collection('projects').doc('logical-cleanup');
+    await project.set({ uid, id: project.id, status: 'source_expired' });
+    const outputs = project.collection('outputs');
+    const retention = { version: 1, kind: 'trial', startsAt: now - 31 * day, promisedUntil: now - day };
+    const write = db.batch();
+    for (let index = 0; index < 50; index++) write.set(outputs.doc(`blocked-${index}`), { retention, expiresAt: now - day, cleanupAt: now - 2, assets: {} });
+    write.set(outputs.doc('healthy'), { retention, expiresAt: now - day, cleanupAt: now - 1, assets: [] });
+    write.set(project.collection('generation').doc('batch'), { snapshotRetention: retention, snapshotCleanupAt: now - 1, brand: { private: 'remove' } });
+    const deleted = project.parent.doc('deleted-project');
+    write.set(deleted, { uid, id: deleted.id, status: 'deleted', payloadCleanupPending: true });
+    const path = sourcePath(uid, 'abandoned', 1, 'mp4');
+    write.set(db.collection('assetCleanup').doc(`${uid}-abandoned`), { paths: [path], nextCheckAt: now, ownerFixture: uid });
+    await write.commit();
+    const removed: string[] = [];
+    const store = createGenerationStore(db, { remove: async value => { removed.push(value); } });
+    await store.cleanup(now);
+    assert.equal((await outputs.doc('healthy').get()).exists, true, 'The first pass remains bounded to fifty outputs.');
+    assert.equal((await project.collection('generation').doc('batch').get()).data()!.brand, undefined);
+    assert.equal((await deleted.get()).exists, false);
+    assert.deepEqual(removed, [path], 'Logical failures must not block physical cleanup.');
+    await store.cleanup(now);
+    assert.equal((await outputs.doc('healthy').get()).exists, false, 'The cursor must reach work behind the failing page.');
+    assert.equal((await outputs.get()).size, 50, 'Failed transactions must leave their payloads intact.');
+    await outputs.doc('blocked-0').update({ assets: [] });
+    await store.cleanup(now);
+    assert.equal((await outputs.doc('blocked-0').get()).exists, false, 'Wrapping retries earlier failures after they recover.');
+  });
+});
+
+test('failed source cleanup advances past a full page and retries after wrapping', emulator, async () => {
+  await withDatabase(async ({ db, uid }) => {
+    const projects = db.collection('accounts').doc(uid).collection('projects');
+    const write = db.batch();
+    for (let index = 0; index < 51; index++) {
+      const id = index === 50 ? 'healthy' : `blocked-${index}`;
+      write.set(projects.doc(id), { uid, id, sourceCleanupAt: index === 50 ? now - 1 : now - 2, attempts: 1, sourceExpiresAt: now - 1 });
+    }
+    await write.commit();
+    const store = createProjectStore(db);
+    const seen: string[] = [];
+    let recovered = false;
+    store.remove = async (_uid, id) => {
+      seen.push(id);
+      if (id.startsWith('blocked') && !recovered) throw new Error('Injected transaction failure');
+      await projects.doc(id).update({ sourceCleanupAt: null });
+      return null;
+    };
+    const worker = createIntakeWorker({ store, now: () => now, importSource: async () => { throw new Error('Not importing'); } });
+    await worker.cleanup();
+    assert.equal(seen.includes('healthy'), false);
+    await worker.cleanup();
+    assert.equal(seen.includes('healthy'), true);
+    recovered = true;
+    await worker.cleanup();
+    assert.equal((await projects.where('sourceCleanupAt', '<=', now).get()).size, 0);
+    assert.equal(seen.filter(id => id === 'blocked-0').length, 2);
   });
 });

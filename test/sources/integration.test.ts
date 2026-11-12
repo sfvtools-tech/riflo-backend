@@ -11,6 +11,7 @@ import test from 'node:test';
 import { deleteApp, getApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
+import { createDevelopmentAccess } from '../../src/access/development-access.js';
 import { featureIds, quotaKeys } from '../../src/access/policy.js';
 import { createFirebaseDependencies, createFirebaseIntakeWorker } from '../../src/firebase.js';
 import { createHandler } from '../../src/http/app.js';
@@ -50,7 +51,7 @@ test('YouTube-only HTTP validation and project creation share the real private i
       void work.then(() => pendingTransactions.delete(work), () => pendingTransactions.delete(work));
       return work;
     }) as typeof db.runTransaction;
-    await db.collection('subscriptionGrants').doc(uid).set({ status: 'active', startsAt: new Date(now - 60_000).toISOString(), expiresAt: new Date(now + 86_400_000).toISOString(), features: [...featureIds], limits: Object.fromEntries(quotaKeys.map((key) => [key, key === 'sourceSeconds' ? 1800 : 1])) });
+    await createDevelopmentAccess(db, uid, { status: 'active', startsAt: new Date(now - 60_000).toISOString(), expiresAt: new Date(now + 86_400_000).toISOString(), features: [...featureIds], limits: Object.fromEntries(quotaKeys.map((key) => [key, key === 'sourceSeconds' ? 1800 : 1])) }, now);
     server = createServer(createHandler({ ...dependencies, verifyToken: async (token) => ({ uid: token }) }));
     await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
     const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
