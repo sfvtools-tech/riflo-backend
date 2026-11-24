@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { deleteApp, initializeApp } from 'firebase-admin/app';
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
-import { createDevelopmentAccess } from '../../src/access/development-access.js';
+import { activatePaidPlan } from '../helpers/access.js';
 import { createLifecycleStore } from '../../src/access/lifecycle-firestore.js';
 import { featureIds, quotaKeys } from '../../src/access/policy.js';
 import { admittedRetention, readRetentionContext } from '../../src/access/retention-firestore.js';
@@ -23,19 +23,12 @@ async function fixture(run: (db: ReturnType<typeof getFirestore>, uid: string) =
   finally { await db.recursiveDelete(db.collection('accounts').doc(uid)); await db.collection('subscriptionGrants').doc(uid).delete(); await db.terminate(); await deleteApp(app); }
 }
 
-test('development access atomically creates explicit authority and rejects missing or foreign facts', local, async () => fixture(async (db, uid) => {
-  const grant = { status: 'active', startsAt: iso(start), expiresAt: iso(start + day), features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, 10])) };
-  const empty = { uid, tenures: new Map() };
-  assert.throws(() => admittedRetention(grant, start, empty), { code: 'retention_unavailable' });
-  await assert.rejects(createDevelopmentAccess(db, uid, { ...grant, expiresAt: iso(start) }, start));
-  assert.equal((await db.collection('subscriptionGrants').doc(uid).get()).exists, false);
-  const access = await createDevelopmentAccess(db, uid, grant, start);
+test('ordinary paid activation creates authority and rejects foreign tenure ownership', local, async () => fixture(async (db, uid) => {
+  const access = await activatePaidPlan(db, uid, start, start + day);
   const context = await readRetentionContext(db, uid, access, []);
-  assert.deepEqual(admittedRetention(access, start, context), { kind: 'paid', tenureId: access.retention.paidTenureId });
-  assert.deepEqual(access.limits, grant.limits);
-  await assert.rejects(createDevelopmentAccess(db, uid, grant, start), /already exists/);
+  assert.deepEqual(admittedRetention(access, start, context), { kind: 'paid', tenureId: access.retention!.paidTenureId });
   assert.equal((await db.collection('accounts').doc(uid).collection('retentionTenures').get()).size, 1);
-  const tenure = db.collection('accounts').doc(uid).collection('retentionTenures').doc(access.retention.paidTenureId);
+  const tenure = db.collection('accounts').doc(uid).collection('retentionTenures').doc(access.retention!.paidTenureId!);
   await tenure.update({ uid: 'another-owner' });
   const foreign = await readRetentionContext(db, uid, access, []);
   assert.throws(() => admittedRetention(access, start, foreign), /unavailable/);
@@ -90,10 +83,10 @@ test('missing admission authority leaves imports, generation reservations and re
   assert.equal((await db.collection('intakeJobs').doc(id).get()).exists, false);
 
   await db.collection('subscriptionGrants').doc(uid).delete();
-  const managed = await createDevelopmentAccess(db, uid, grant, start);
+  const managed = await activatePaidPlan(db, uid, start, start + day);
   await db.collection('subscriptionGrants').doc(uid).update({ retention: FieldValue.delete() });
   const project = account.collection('projects').doc(id);
-  const stored = { id, uid, source, status: 'source_ready', sourceAllowanceConsumed: true, reservedSourceSeconds: 0, period: 'fixture-period', storagePath: `accounts/${uid}/projects/${id}/source/video.mp4`, importedAt: start, sourceExpiresAt: start + 60 * day, sourceRetention: { version: 1, kind: 'paid', tenureId: managed.retention.paidTenureId, promisedUntil: start + 60 * day } };
+  const stored = { id, uid, source, status: 'source_ready', sourceAllowanceConsumed: true, reservedSourceSeconds: 0, period: 'fixture-period', storagePath: `accounts/${uid}/projects/${id}/source/video.mp4`, importedAt: start, sourceExpiresAt: start + 60 * day, sourceRetention: { version: 1, kind: 'paid', tenureId: managed.retention!.paidTenureId, promisedUntil: start + 60 * day } };
   await project.set(stored);
   const store = createGenerationStore(db);
   await assert.rejects(store.start(uid, id, 'missing-authority-generation', { x_posts: 1, linkedin_posts: 0 }, start), { code: 'retention_unavailable' });

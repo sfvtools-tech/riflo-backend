@@ -1,5 +1,5 @@
 import { sourceDeadline } from '../helpers/retention.js';
-import { createDevelopmentAccess } from '../../src/access/development-access.js';
+import { seedManualGrant } from '../helpers/access.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -69,7 +69,7 @@ async function setup() {
   const account = db.collection('accounts').doc(uid);
   const grantRef = db.collection('subscriptionGrants').doc(uid);
   const grant: Grant = { status: 'active', startsAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 3_600_000).toISOString(), features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, key === 'sourceSeconds' ? 60 : 2])) as Grant['limits'] };
-  Object.assign(grant, await createDevelopmentAccess(db, uid, grant, now));
+  Object.assign(grant, await seedManualGrant(db, uid, grant, now));
   const intake = createProjectStore(db);
   const store = createGenerationStore(db);
   let clock = now;

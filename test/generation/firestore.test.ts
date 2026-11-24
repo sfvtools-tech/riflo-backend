@@ -1,5 +1,5 @@
 import { contentDeadline } from '../helpers/retention.js';
-import { createDevelopmentAccess } from '../../src/access/development-access.js';
+import { seedManualGrant } from '../helpers/access.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
@@ -398,7 +398,7 @@ async function setup() {
   const intake = createProjectStore(db);
   const store = createGenerationStore(db);
   const grant = { status: 'active', startsAt: '2026-01-01T00:00:00Z', expiresAt: '2026-11-01T00:00:00Z', features: [...featureIds], limits: Object.fromEntries(quotaKeys.map((key) => [key, key === 'sourceSeconds' ? 3600 : key === 'x_posts' ? 2 : 1])) };
-  Object.assign(grant, await createDevelopmentAccess(db, uid, grant, Date.parse(grant.startsAt)));
+  Object.assign(grant, await seedManualGrant(db, uid, grant, Date.parse(grant.startsAt)));
   const readySource = async (importedAt = now + 1) => {
     const id = randomUUID();
     await intake.create({ uid, id, key: randomUUID(), input: { fileId: 'video-id' }, source: { fileId: 'video-id', name: 'video.mp4', mimeType: 'video/mp4', bytes: 9, durationSeconds: 60, requiresProbe: true }, now: importedAt - 1 });

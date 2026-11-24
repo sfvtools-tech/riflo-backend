@@ -1,12 +1,11 @@
 import assert from 'node:assert/strict';
-import { createDevelopmentAccess } from '../../src/access/development-access.js';
+import { activatePaidPlan } from '../helpers/access.js';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import type { Firestore } from 'firebase-admin/firestore';
 import { createProjectStore } from '../../src/projects/firestore.js';
 import { createGenerationStore } from '../../src/generation/firestore.js';
 import { createGenerationService } from '../../src/generation/service.js';
-import { featureIds, quotaKeys } from '../../src/access/policy.js';
 
 const now = Date.parse('2026-10-18T12:00:00Z');
 const hash = (key: string) => createHash('sha256').update(key).digest('hex');
@@ -23,7 +22,7 @@ async function documents() {
     set: (ref: any, data: any) => saved.set(ref.path, structuredClone(data)),
     create: (ref: any, data: any) => { assert.equal(saved.has(ref.path), false); saved.set(ref.path, structuredClone(data)); },
   }) } as unknown as Firestore;
-  await createDevelopmentAccess(db, 'alice', { status: 'active', startsAt: '2026-10-01T00:00:00Z', expiresAt: '2026-11-01T00:00:00Z', features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, 3600])) }, now);
+  await activatePaidPlan(db, 'alice', now, Date.parse('2026-11-01T00:00:00Z'));
   return { db, saved };
 }
 

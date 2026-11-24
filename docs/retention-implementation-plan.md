@@ -28,7 +28,7 @@ The shared resolver is `src/access/retention.ts`. Reads, asset delivery, generat
 
 ## Access setup
 
-New trials and paid lifecycle transitions always create retention authority. Trusted development setup uses `createDevelopmentAccess` from `src/access/development-access.ts`: it atomically creates a new explicit development grant and its paid-style retention tenure, without changing the grant's accounting or allowances. It refuses to overwrite existing access. Raw grants without retention authority cannot admit imports or generation.
+New trials and paid lifecycle transitions always create retention authority. Test accounts use the same lifecycle as customers. Trusted paid-plan assignment uses `npm run access:admin` through the existing lifecycle store; see [administrative plan assignment](trial-paid-lifecycle-api.md#administrative-plan-assignment). No development-access grant writer remains. Raw grants without retention authority cannot admit imports or generation.
 
 `TRIAL_ENABLED` remains a separate product-access switch. Retention itself has no switch.
 
@@ -40,11 +40,23 @@ Provider work keeps fixed stage and batch deadlines. Retention extensions can re
 
 ## Deployment prerequisite: clean application data
 
-This release intentionally removes old-record support. **Do not deploy it over the existing development database.** Stop API/worker writes, perform the separately authorized reset of Firestore application data, Storage files and Firebase Authentication users, and deploy the single-policy code before allowing new signups/imports. Infrastructure, rules, indexes, secrets and CI/CD are preserved.
+This release intentionally removes old-record support. **Do not deploy it over the existing development database.** Stop API/worker writes, perform the separately authorized reset of Firestore application data, Storage files and Firebase Authentication users, and deploy API readers/writers and all workers from the same single-policy version before allowing new signups/imports. Mixed old/new retention versions are unsupported. Infrastructure, rules, indexes, secrets and CI/CD are preserved.
 
 Before the first release, update the installed deployment helper to the checked-in version: older helpers require the removed retention configuration value and would reject the new workflow payload. Remove the obsolete GitHub variable/runtime setting during that controlled deployment. This code change does not perform either deployment or data reset.
 
 No retention migration or output-fingerprint backfill machinery remains; new outputs receive fingerprints when saved.
+
+## Release requirements
+
+Before public trial activation or retention/capacity promises:
+
+- Complete the separately authorized clean-state deployment above; verify the installed deployment helper, deployed indexes/rules and cleanup health. Keep `TRIAL_ENABLED=false` until release checks pass.
+- Provision a stable dedicated trial HMAC secret and a rotation procedure that preserves identity-use protection. Verify actual TTL deletion for transient `trialAbuseRates` only; persistent `trialAbuseClaims` and `trialAbuseBindings` must not inherit TTL. Disclose pseudonymous lifetime trial-use evidence and the limits of Google-account identity truthfully.
+- Verify actual Storage soft delete, versioning, holds, retention locks and native lifecycle policies, including preservation of cleanup markers and appropriate IAM. Verify Firestore backups/PITR and recovery behavior. Application expiry does not prove permanent erasure or immediate billing savings; privacy and retention copy must reflect recoverable copies.
+- Measure multi-GB throughput, realistic/worst-case media, concurrent scratch capacity and whole-worker RAM/disk on the deployment host, plus live-provider acceptance, latency and costs. Admission caps and local fixtures do not establish this capacity. See [measured worker limitations](worker-limitations-validation.md).
+- Verify current offering/privacy copy against trial activation, separate meters, retention and explicit restoration. Payment collection and automatic restoration remain outside this implementation.
+
+These are outstanding deployment checks, not claims that a reset, cloud verification or public enablement has occurred. Keep local regression evidence distinct from live-service readiness.
 
 ## Verification boundaries
 

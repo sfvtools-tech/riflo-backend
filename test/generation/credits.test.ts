@@ -1,4 +1,4 @@
-import { createDevelopmentAccess } from '../../src/access/development-access.js';
+import { seedManualGrant } from '../helpers/access.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
@@ -45,7 +45,7 @@ async function setup(credits: number) {
   const grantRef = db.collection('subscriptionGrants').doc(uid);
   const grant = planGrant('lower', randomUUID(), new Date(now - 90 * 86_400_000).toISOString(), new Date(now + 1_000_000).toISOString());
   grant.limits.creationCredits = credits;
-  Object.assign(grant, await createDevelopmentAccess(db, uid, grant, Date.parse(grant.startsAt)));
+  Object.assign(grant, await seedManualGrant(db, uid, grant, Date.parse(grant.startsAt)));
   const imports = createProjectStore(db);
   const generations = createGenerationStore(db);
   const usage = account.collection('allowances').doc(grantPeriod(grant));

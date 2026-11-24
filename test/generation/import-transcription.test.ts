@@ -1,11 +1,10 @@
-import { createDevelopmentAccess } from '../../src/access/development-access.js';
+import { activatePaidPlan } from '../helpers/access.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { initializeApp, deleteApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
-import { featureIds, quotaKeys, type LegacyGrant } from '../../src/access/policy.js';
 import { createProjectStore } from '../../src/projects/firestore.js';
 import { createSourceImporter, sourcePath } from '../../src/projects/source.js';
 import { createIntakeWorker } from '../../src/projects/worker.js';
@@ -28,8 +27,7 @@ async function fixture() {
   const db = getFirestore(app);
   const account = db.collection('accounts').doc(uid);
   const grantRef = db.collection('subscriptionGrants').doc(uid);
-  const grant: LegacyGrant = { status: 'active', startsAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 3_600_000).toISOString(), features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, key === 'sourceSeconds' ? 120 : 2])) as LegacyGrant['limits'] };
-  Object.assign(grant, await createDevelopmentAccess(db, uid, grant, now));
+  await activatePaidPlan(db, uid, now, now + 3_600_000);
   const intake = createProjectStore(db);
   const generation = createGenerationStore(db);
   const project = await intake.create({ uid, id: randomUUID(), key: randomUUID(), now, input: { fileId: 'fixture' }, source: { fileId: 'fixture', name: 'Video', mimeType: 'video/mp4', bytes: 9, durationSeconds: 60, requiresProbe: true } });
@@ -74,7 +72,7 @@ test('staged import transcript is hidden until source settlement and follows onl
     const after = await f.intake.usage(f.uid, now + 1102);
     assert.equal(after.consumed.sourceSeconds, 60);
     assert.equal(after.reserved.sourceSeconds, 0);
-    assert.equal(after.consumed.x_posts, 0);
+    assert.equal(after.consumed.creationCredits, 0);
     const events = await f.account.collection('usageEvents').where('stage', '==', 'transcribe').get();
     assert.equal(events.size, 1);
     assert.equal(events.docs[0]!.data().cost.amountMicros, 5200);
@@ -148,6 +146,7 @@ test('matching staged transcript survives upload retry without another ASR claim
 test('actual source allowance is checked before creating a paid attempt', emulatorOnly, async () => {
   const f = await fixture();
   try {
+    await f.account.collection('allowances').doc(f.project.period).update({ 'consumed.sourceSeconds': 17_880 });
     await assert.rejects(f.generation.claimImport!(f.claim, { ...f.source, durationSeconds: 121 }, now + 2), { code: 'allowance_exceeded' });
     assert.equal((await f.account.collection('usageEvents').where('stage', '==', 'transcribe').get()).size, 0);
     assert.equal((await f.ref.collection('generation').get()).size, 0);

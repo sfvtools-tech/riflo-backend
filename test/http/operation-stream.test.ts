@@ -191,6 +191,7 @@ test('every streaming command reserves before new work while accepted replays ac
         const project = f.projects.get(base.id)!;
         project.status = kind === 'retry-import' ? 'failed' : 'source_expired';
         project.sourceRetention = { kind: 'trial', startsAt: now - 15 * 86_400_000, version: 1, promisedUntil: now - 86_400_000 };
+        project.sourceExpiresAt = now - 86_400_000;
         project.retryAvailableAt = now;
       }
       const path = kind === 'create' ? '/v1/projects' : `/v1/projects/${base.id}/${kind}`;

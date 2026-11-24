@@ -1,5 +1,5 @@
 import { createLifecycleStore } from '../../src/access/lifecycle-firestore.js';
-import { createDevelopmentAccess } from '../../src/access/development-access.js';
+import { activatePaidPlan } from '../helpers/access.js';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -9,7 +9,6 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { deleteApp, initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
-import { featureIds, quotaKeys } from '../../src/access/policy.js';
 import { createGenerationStore } from '../../src/generation/firestore.js';
 import { createProjectStore } from '../../src/projects/firestore.js';
 import { createIntakeWorker } from '../../src/projects/worker.js';
@@ -118,7 +117,7 @@ test('newly discovered expired sources behind the cursor are reached while faile
 
 test('cleanup preserves a permanent import failure while removing abandoned source files', emulator, async () => {
   await withDatabase(async ({ db, uid }) => {
-    await createDevelopmentAccess(db, uid, { status: 'active', startsAt: '2026-10-01T00:00:00Z', expiresAt: '2026-11-01T00:00:00Z', features: [...featureIds], limits: Object.fromEntries(quotaKeys.map((key) => [key, 1800])) }, now);
+    await activatePaidPlan(db, uid, now, Date.parse('2026-11-01T00:00:00Z'));
     const store = createProjectStore(db);
     const project = await store.create({ uid, id: randomUUID(), key: 'failed-import-key', now, input: { fileId: 'fixture-video' }, source: { fileId: 'fixture-video', name: 'Video', mimeType: 'video/mp4', bytes: 9, durationSeconds: 10, requiresProbe: true } });
     const claim = await store.claim('fixture-worker', now, 1000);

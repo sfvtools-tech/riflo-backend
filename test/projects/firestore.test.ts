@@ -1,5 +1,5 @@
 import { createLifecycleStore } from '../../src/access/lifecycle-firestore.js';
-import { createDevelopmentAccess } from '../../src/access/development-access.js';
+import { seedManualGrant } from '../helpers/access.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
@@ -37,7 +37,7 @@ async function setup(allowance: number, expiresAt: string) {
   const db = getFirestore(app);
   const store = createProjectStore(db);
   const grant = { status: 'active', startsAt: '2026-10-01T00:00:00Z', expiresAt, features: [...featureIds], limits: Object.fromEntries(quotaKeys.map((key) => [key, key === 'sourceSeconds' ? allowance : 1])) };
-  Object.assign(grant, await createDevelopmentAccess(db, uid, grant, now));
+  Object.assign(grant, await seedManualGrant(db, uid, grant, now));
   const create = (key: string = randomUUID(), seconds: number | null = 60, fileId = 'video-id') => store.create({
     uid, id: randomUUID(), key, now, input: { fileId },
     source: { fileId, name: 'video.mp4', mimeType: 'video/mp4', bytes: 9, durationSeconds: seconds, requiresProbe: true },

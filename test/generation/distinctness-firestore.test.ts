@@ -1,11 +1,10 @@
 import { outputFingerprint } from '../../src/generation/history.js';
-import { createDevelopmentAccess } from '../../src/access/development-access.js';
+import { activatePaidPlan } from '../helpers/access.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { initializeApp, deleteApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
-import { featureIds, quotaKeys } from '../../src/access/policy.js';
 import { createProjectStore } from '../../src/projects/firestore.js';
 import { sourcePath } from '../../src/projects/source.js';
 import { createGenerationStore } from '../../src/generation/firestore.js';
@@ -26,7 +25,7 @@ async function fixture() {
   const db = getFirestore(app);
   const account = db.collection('accounts').doc(uid);
   const grant = db.collection('subscriptionGrants').doc(uid);
-  const access = await createDevelopmentAccess(db, uid, { status: 'active', startsAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 86_400_000).toISOString(), features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, key === 'sourceSeconds' ? 600 : 30])) }, now);
+  const access = await activatePaidPlan(db, uid, now, now + 86_400_000);
   const intake = createProjectStore(db);
   const store = createGenerationStore(db);
   let clock = now;
@@ -35,7 +34,7 @@ async function fixture() {
   assert.ok(claim);
   await intake.complete(claim, { bytes: 9, durationSeconds: 60, storagePath: sourcePath(uid, project.id, claim.attempt) }, ++clock);
   const projectRef = account.collection('projects').doc(project.id);
-  await projectRef.collection('transcripts').doc('shared').set({ ...transcript, createdAt: clock, expiresAt: now + 61 * 86_400_000, retention: { version: 1, kind: 'paid', tenureId: access.retention.paidTenureId, promisedUntil: now + 61 * 86_400_000 } });
+  await projectRef.collection('transcripts').doc('shared').set({ ...transcript, createdAt: clock, expiresAt: now + 61 * 86_400_000, retention: { version: 1, kind: 'paid', tenureId: access.retention!.paidTenureId, promisedUntil: now + 61 * 86_400_000 } });
   const start = async (selection: Selection) => store.start(uid, project.id, randomUUID(), selection, ++clock);
   const next = async () => { const claim = await store.claim('worker', ++clock, 1000); assert.ok(claim); assert.equal(claim.stage, 'generate'); return claim; };
   const seed = async (value: Partial<GeneratedOutput>) => {
@@ -44,7 +43,7 @@ async function fixture() {
     const output = { id, feature: 'x_posts' as const, text: 'Existing lesson.', createdAt: clock, expiresAt: now + 61 * 86_400_000, model: 'fixture', promptVersion: 'fixture', ...value };
     const retention = expired
       ? { version: 1 as const, kind: 'trial' as const, startsAt: now - 30 * 86_400_000, promisedUntil: now }
-      : { version: 1 as const, kind: 'paid' as const, tenureId: access.retention.paidTenureId, promisedUntil: output.expiresAt };
+      : { version: 1 as const, kind: 'paid' as const, tenureId: access.retention!.paidTenureId, promisedUntil: output.expiresAt };
     await projectRef.collection('outputs').doc(id).set({ ...output, ...(expired ? { createdAt: now - 29 * 86_400_000 } : {}), retention, contentFingerprint: outputFingerprint(output.feature, output) });
   };
   return { uid, app, db, account, project, projectRef, intake, store, start, next, seed, tick: () => ++clock, clock: () => clock, async close() {
@@ -75,8 +74,8 @@ test('same-batch and later-batch repeats fail without output consumption, source
     assert.equal((await store.batch(uid, project.id))!.status, 'partial');
     assert.equal((await store.batch(uid, project.id))!.slots[1]!.errorCode, 'duplicate_generated_output');
     const usage = await intake.usage(uid, clock());
-    assert.equal(usage.consumed.x_posts, 1);
-    assert.equal(usage.reserved.x_posts, 0);
+    assert.equal(usage.consumed.creationCredits, 1);
+    assert.equal(usage.reserved.creationCredits, 0);
     assert.equal(usage.consumed.sourceSeconds, 60);
     assert.equal((await store.outputs(uid, project.id, clock())).length, 1);
     const before = (await account.collection('usageEvents').get()).docs.find(document => document.data().errorCode === 'duplicate_generated_output')!.data();
@@ -93,7 +92,7 @@ test('same-batch and later-batch repeats fail without output consumption, source
     assert.equal(await store.saveOutput(later, result('One supported lesson.'), tick()), false);
     assert.equal((await store.batch(uid, project.id))!.status, 'failed');
     assert.equal(await store.claim('worker', tick(), 1000), null);
-    assert.equal((await intake.usage(uid, clock())).consumed.x_posts, 1);
+    assert.equal((await intake.usage(uid, clock())).consumed.creationCredits, 1);
     assert.equal((await intake.usage(uid, clock())).consumed.sourceSeconds, 60);
   });
 });
@@ -107,7 +106,7 @@ test('same words in another format or expired history do not block delivery; con
     const savedAt = tick();
     const saved = await Promise.all([store.saveOutput(claim, result('A clear lesson.'), savedAt), store.saveOutput(claim, result('A clear lesson.'), savedAt)]);
     assert.deepEqual(saved.sort(), [false, true]);
-    assert.equal((await intake.usage(uid, clock())).consumed.x_posts, 1);
+    assert.equal((await intake.usage(uid, clock())).consumed.creationCredits, 1);
     assert.equal((await store.outputs(uid, project.id, clock())).filter(output => output.feature === 'x_posts').length, 1);
     await start({ x_posts: 1, linkedin_posts: 0 });
     assert.equal(await store.saveOutput(await next(), result('A clear lesson!'), tick()), true);
@@ -123,7 +122,7 @@ test('identical final legacy clip ranges reject and durably queue rendered files
     const rendered = { ...result({ status: 'ok' as const, segments: [{ startSeconds: 10, endSeconds: 20 }] }), assets: [{ id: 'clip', storagePath: videoPath(uid, project.id, clip.slot!.id, clip.attempt), contentType: 'video/mp4' as const, durationSeconds: 10, bytes: 50, width: 720, height: 1280 }] };
     assert.equal(await store.saveOutput(clip, rendered, tick()), false);
     assert.equal((await store.batch(uid, project.id))!.status, 'partial');
-    assert.equal((await intake.usage(uid, clock())).consumed.short_videos, 0);
+    assert.equal((await intake.usage(uid, clock())).consumed.creationCredits, 1, 'The rejected clip adds no credits to the delivered post.');
     assert.equal((await intake.usage(uid, clock())).consumed.sourceSeconds, 60);
     const pending = await db.collection('assetCleanup').get();
     assert.ok(pending.docs.some(document => document.data().paths.includes(rendered.assets[0]!.storagePath)));
@@ -153,22 +152,22 @@ test('the worker supplies delivered history to one call and does not retry a dup
   });
 });
 
-test('structured duplicates release only their format allowance and partial carousel cleanup is durable', emulatorOnly, async () => {
+test('structured duplicates release their reserved credits and partial carousel cleanup is durable', emulatorOnly, async () => {
   await withFixture(async ({ uid, db, project, intake, store, start, next, seed, tick, clock }) => {
     const values = [
       { feature: 'blogs' as const, data: { status: 'ok' as const, title: 'A lesson', bodyMarkdown: 'One supported explanation.' } },
       { feature: 'newsletters' as const, data: { status: 'ok' as const, subject: 'A lesson', previewText: 'One practical point', bodyMarkdown: 'One supported explanation.' } },
       { feature: 'carousels' as const, data: { status: 'ok' as const, slides: Array.from({ length: 5 }, (_, index) => ({ title: `Point ${index + 1}`, body: 'A source-supported explanation.' })) } },
     ];
-    for (const { feature, data } of values) {
+    for (const [index, { feature, data }] of values.entries()) {
       await seed({ feature, text: 'Prior structured content.', data });
       await start({ x_posts: 1, linkedin_posts: 0, [feature]: 1 });
       assert.equal(await store.saveOutput(await next(), result(`A different post for ${feature}.`), tick()), true);
       const claim = await next();
       const assets = feature === 'carousels' ? Array.from({ length: 5 }, (_, index) => ({ id: `slide-${index + 1}`, storagePath: assetPath(uid, project.id, claim.slot!.id, claim.attempt, index + 1), contentType: 'image/png' as const, bytes: 50, width: carouselLimits.width, height: carouselLimits.height })) : undefined;
       assert.equal(await store.saveOutput(claim, { ...result(data), ...(assets ? { assets } : {}) }, tick()), false);
-      assert.equal((await intake.usage(uid, clock())).consumed[feature], 0);
-      assert.equal((await intake.usage(uid, clock())).reserved[feature], 0);
+      assert.equal((await intake.usage(uid, clock())).consumed.creationCredits, index + 1, 'Only the delivered posts consume credits.');
+      assert.equal((await intake.usage(uid, clock())).reserved.creationCredits, 0);
     }
     await start({ x_posts: 0, linkedin_posts: 0, carousels: 1, short_videos: 1 });
     const claim = await next();
