@@ -440,48 +440,74 @@ test('racing generation admissions cannot spend the same combined trial and paid
 });
 
 for (const succeeds of [true, false]) {
-  test(`claim releases expired split video funding before surviving text ${succeeds ? 'delivery' : 'failure'}`, local, async () => {
-    await withAccount(async ({ uid, account, imports, generations, trialRef, paidRef, seedRemainders, ready }) => {
-      await seedRemainders(2700, 3, 18000, 20);
-      const id = await ready(), waiting = await ready();
-      const project = account.collection('projects').doc(id);
-      await project.update({ sourceExpiresAt: now + 10 });
-      await project.collection('transcripts').doc('shared').set({ text: 'A useful source idea.', words: [{ text: 'A useful source idea.', start: 0, end: 5 }], createdAt: now + 3, expiresAt: now + 86_400_000 });
+  test(`claim releases expired paid video funding before surviving text ${succeeds ? 'delivery' : 'failure'}`, local, async () => {
+    const uid = `paid-source-expiry-${randomUUID()}`;
+    const app = initializeApp({ projectId: 'demo-riflo' }, uid);
+    const db = getFirestore(app);
+    const account = db.collection('accounts').doc(uid);
+    const day = 86_400_000;
+    let clock = now - 60 * day;
+    const lifecycle = createLifecycleStore(db, { now: () => clock });
+    const imports = createProjectStore(db);
+    const generations = createGenerationStore(db);
+    try {
+      let paid = await lifecycle.transition(uid, randomUUID(), { type: 'activate_paid', expectedRevision: 0, plan: 'lower', periodId: randomUUID(), startsAt: iso(clock), expiresAt: iso(clock + 30 * day) });
+      const imported = async (at: number) => {
+        const project = await imports.create({ uid, id: randomUUID(), key: randomUUID(), now: at, input: { fileId: 'source' }, source: { fileId: 'source', name: 'Video', mimeType: 'video/mp4', bytes: 9, durationSeconds: 30, requiresProbe: true } });
+        const claim = (await imports.claim('importer', at + 1, 1000))!;
+        const source = { bytes: 9, durationSeconds: 30, sourceSha256: 'a'.repeat(64), storagePath: `accounts/${uid}/projects/${project.id}/source/attempt-${claim.attempt}.video` };
+        const transcription = (await generations.claimImport!(claim, source, at + 2))!;
+        await generations.saveTranscript(transcription, result({ text: 'A useful source idea.', words: [{ text: 'Idea.', start: 0, end: 5 }] }), at + 3);
+        await imports.complete(claim, source, at + 10);
+        return project.id;
+      };
+      const id = await imported(clock);
+      let waiting = '';
+      for (const at of [now - 30 * day, now]) {
+        clock = at;
+        paid = await lifecycle.transition(uid, randomUUID(), { type: 'renew', expectedRevision: paid.revision, plan: 'lower', periodId: randomUUID(), startsAt: iso(clock), expiresAt: iso(clock + 30 * day) });
+        if (at < now) waiting = await imported(at + 100);
+      }
+      const ledger = account.collection('allowances').doc(`shared-${paid.paid!.grant.allowancePeriodId}`);
       const batch = await generations.start(uid, id, `expire_video_${succeeds}`, { x_posts: 1, linkedin_posts: 0, short_videos: 1 }, now + 4);
       const video = batch.slots.find(slot => slot.feature === 'short_videos')!;
-      assert.deepEqual(video.charge!.allocations!.map(owner => owner.amount), [2, 2]);
       await generations.start(uid, waiting, 'unrelated_carousel', { x_posts: 0, linkedin_posts: 0, carousels: 1 }, now + 5);
-      const counts = async () => [(await trialRef.get()).data()!, (await paidRef.get()).data()!];
-      const before = await counts();
-      assert.deepEqual(before.map(value => value.reserved.creationCredits), [3, 4]);
-
-      // Expiry occurs between cleanup passes; claim must persist its own release.
+      assert.equal((await ledger.get()).data()!.reserved.creationCredits, 7);
+      // The original reaches its real sixty-day deadline before the next cleanup pass.
       const text = (await generations.claim('writer', now + 11, 1000))!;
       assert.equal(text.project.id, id);
       assert.equal(text.slot!.feature, 'x_posts');
       assert.equal((await imports.get(uid, id))!.status, 'source_ready');
       assert.equal((await generations.batch(uid, id))!.slots.find(slot => slot.id === video.id)!.errorCode, 'source_expired');
-      assert.deepEqual((await counts()).map(value => value.reserved.creationCredits), [1, 2]);
-      assert.deepEqual((await counts()).map(value => value.consumed), before.map(value => value.consumed));
-
-      const failure = { ...result(null), code: 'invalid_generated_output', retryable: false };
+      assert.equal((await ledger.get()).data()!.reserved.creationCredits, 3);
       if (succeeds) {
         assert.equal(await generations.saveOutput(text, result('A useful post grounded in the source.'), now + 12), true);
-        assert.equal(await generations.saveOutput(text, result('A useful post grounded in the source.'), now + 13), false);
+        assert.equal(await generations.saveOutput(text, result('A duplicate.'), now + 13), false);
       } else {
+        const failure = { ...result(null), code: 'invalid_generated_output', retryable: false };
         assert.equal(await generations.fail(text, failure, now + 12), true);
         assert.equal(await generations.fail(text, failure, now + 13), false);
       }
-      const after = await counts();
-      assert.deepEqual(after.map(value => value.reserved.creationCredits), [0, 2]);
-      assert.deepEqual(after.map(value => value.consumed.creationCredits), [12 + Number(succeeds), 100]);
-      assert.deepEqual(after.map(value => value.consumed.sourceSeconds), before.map(value => value.consumed.sourceSeconds));
+      const after = (await ledger.get()).data()!;
+      assert.equal(after.reserved.creationCredits, 2);
+      assert.equal(after.consumed.creationCredits, Number(succeeds));
+      assert.equal(after.consumed.sourceSeconds, 0);
+      assert.equal((await account.collection('allowances').get()).docs.reduce((sum, doc) => sum + doc.data().consumed.sourceSeconds, 0), 60);
       assert.equal((await generations.batch(uid, id))!.status, succeeds ? 'partial' : 'failed');
       await imports.remove(uid, id, now + 14);
-      await imports.remove(uid, id, now + 15);
-      assert.deepEqual(await counts(), after);
+      assert.deepEqual((await ledger.get()).data(), after);
       await imports.remove(uid, waiting, now + 16);
-      assert.deepEqual((await counts()).map(value => value.reserved.creationCredits), [0, 0]);
-    });
+      assert.equal((await ledger.get()).data()!.reserved.creationCredits, 0);
+    } finally {
+      for (const name of ['intakeJobs', 'generationJobs']) {
+        const jobs = await db.collection(name).where('uid', '==', uid).get();
+        await Promise.all(jobs.docs.map(doc => doc.ref.delete()));
+      }
+      const cleanup = await db.collection('assetCleanup').where('owner.uid', '==', uid).get();
+      await Promise.all(cleanup.docs.map(doc => doc.ref.delete()));
+      await db.recursiveDelete(account);
+      await db.collection('subscriptionGrants').doc(uid).delete();
+      await db.terminate(); await deleteApp(app);
+    }
   });
 }

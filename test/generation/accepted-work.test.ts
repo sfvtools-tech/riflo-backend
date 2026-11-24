@@ -1,3 +1,4 @@
+import { seedManualGrant } from '../helpers/access.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
@@ -39,7 +40,7 @@ async function setup() {
   const account = db.collection('accounts').doc(uid);
   const grantRef = db.collection('subscriptionGrants').doc(uid);
   const grant: Grant = { status: 'active', startsAt: new Date(now - 60_000).toISOString(), expiresAt: new Date(now + 50).toISOString(), features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, key === 'sourceSeconds' ? 120 : 2])) as Grant['limits'] };
-  await grantRef.set(grant);
+  Object.assign(grant, await seedManualGrant(db, uid, grant, now));
   const imports = createProjectStore(db);
   const generations = createGenerationStore(db);
   const oldUsage = account.collection('allowances').doc(grantPeriod(grant));

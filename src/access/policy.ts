@@ -1,3 +1,4 @@
+import { isAccountRetention, type AccountRetention } from './retention.js';
 import { resolveSourceLimits } from './source-limits.js';
 import { isLifecycle, resolveAccess } from './lifecycle.js';
 
@@ -6,12 +7,12 @@ export type FeatureId = typeof featureIds[number];
 export const quotaKeys = ['sourceSeconds', ...featureIds] as const;
 export type QuotaKey = typeof quotaKeys[number];
 export type LegacyGrant = {
+  retention?: AccountRetention;
   status: 'active';
   startsAt: string;
   expiresAt: string;
   features: FeatureId[];
   limits: Record<QuotaKey, number>;
-  sourceRetentionDays?: 1 | 7 | 30;
 };
 
 export type SharedCreditGrant = Omit<LegacyGrant, 'limits'> & {
@@ -45,9 +46,6 @@ export const operationalLimits = {
   transientRetries: 2,
   importRetryCooldownSeconds: 60,
   projectLifetimeHours: 24,
-  sourceRetentionDays: 7 as const,
-  outputRetentionDays: 30,
-  transcriptRetentionDays: 30,
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -58,7 +56,7 @@ export function isGrant(value: unknown): value is Grant {
   if (!record(value) || value.kind === 'lifecycle' || value.status !== 'active' || !Array.isArray(value.features) || !record(value.limits)) return false;
   if (!value.features.every((id) => featureIds.includes(id)) || new Set(value.features).size !== value.features.length) return false;
 
-  if (value.sourceRetentionDays !== undefined && ![1, 7, 30].includes(value.sourceRetentionDays as number)) return false;
+  if (value.retention !== undefined && !isAccountRetention(value.retention)) return false;
 
   const limits = value.limits;
   const keys = value.accounting === 'shared_credits' ? ['sourceSeconds', 'creationCredits'] : quotaKeys;
@@ -106,7 +104,7 @@ export function buildCapabilities(rawGrant: unknown, now = new Date(), implement
     features,
     ...(grant && isSharedCreditGrant(grant) ? { accounting: { mode: 'shared_credits' as const, ...(!lifecycle ? { periodId: grant.allowancePeriodId } : {}), creditCosts: { ...creationCreditCosts } } } : {}),
     limits: active ? lifecycle ? { sourceSeconds: resolved.funding.reduce((sum, entry) => sum + entry.limits.sourceSeconds, 0), creationCredits: resolved.funding.reduce((sum, entry) => sum + entry.limits.creationCredits, 0) } : { ...grant!.limits } : null,
-    operationalLimits: { ...operationalLimits, ...resolveSourceLimits(rawGrant, now.getTime()), sourceRetentionDays: active ? grant!.sourceRetentionDays ?? operationalLimits.sourceRetentionDays : operationalLimits.sourceRetentionDays },
+    operationalLimits: { ...operationalLimits, ...resolveSourceLimits(rawGrant, now.getTime()) },
     generationBatchLimits,
   };
 }

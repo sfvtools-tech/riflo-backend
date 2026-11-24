@@ -1,8 +1,7 @@
 # Trial and paid lifecycle: proposed next implementation slice
 
 Planning only, 29 October 2026. No application, grant, billing or runtime changes accompany this document.
-Offering authority: [frozen findings](../TEMP_PRODUCT_OFFERING_FINDINGS.md) and [development record](../TEMP_DEVELOPMENT_CHANGES.md).
-The historical lifecycle decisions below were supplied from earlier user approvals; they are a documentation gap in those files, not questions to reopen.
+This document preserves the historical approved offering and planning decisions. For current behavior and release requirements, use the [lifecycle contract](trial-paid-lifecycle-api.md) and [retention policy](retention-implementation-plan.md).
 Implementation choices and continuity recommendations are explicitly proposals pending review.
 
 ## Approved behavior and boundaries
@@ -43,7 +42,7 @@ The same identity and same payload replays the recorded result; changed payload,
 Persist replay evidence with the transition transaction. Do not rely on remembering only the latest event, which cannot protect older retries.
 Use existing ID generation and explicit UTC period boundaries; do not invent a monthly date-arithmetic policy or infer payment from a browser request.
 No public administrator endpoint, payment mock, webhook system or provider abstraction is needed for this slice.
-Internal paid transitions are testable lifecycle functions, not end-to-end billing; the trusted operational caller/handoff remains pending. Do not add an unapproved administrator CLI.
+Internal paid transitions are testable lifecycle functions, not end-to-end billing. The subsequently approved trusted [administrative command](trial-paid-lifecycle-api.md#administrative-plan-assignment) now invokes those functions for ordinary plan assignment; payment integration remains pending.
 
 | Transition | Proposed data operation implementing approved behavior |
 | --- | --- |
@@ -112,6 +111,6 @@ Extend existing frontend unit tests for response parsing, allowance display and 
 5. Wire all HTTP access consumers and define public capabilities/usage/availability fields for separate balances/deadlines. Integrate frontend only after internal transition and emulator checks pass.
 6. Satisfy retention compatibility, abuse and truthful privacy/offering release gates before enabling real-user trial activation. Approved trial original day 14/output day 30 and paid promotion cannot be promised while old cleanup deletes earlier. This is a rollout dependency, not retention implementation added to this slice.
 
-At this scope's planning stage, retention promotion/deletion execution, explicit restoration, payment provider integration, larger-source readiness and multiple-brand features were follow-on work. Explicit source restoration is now implemented separately; see [current contracts, source-minute accounting and verified-identity/legacy limits](implementation-assumptions-and-attention.md#explicit-source-restoration--implemented-independent-acceptance-pending-30-october-2026). Automatic restoration remains excluded, and root independent restoration acceptance remains pending.
+At this scope's planning stage, retention promotion/deletion execution, explicit restoration, payment provider integration, larger-source readiness and multiple-brand features were follow-on work. Explicit source restoration is now implemented separately; see [current contracts, source-minute accounting and verified-identity limits](trial-paid-lifecycle-api.md#explicit-source-restoration). Automatic restoration remains excluded; historical planning status here does not establish current release readiness.
 Preserve trial start, paid start/end and period identity so retention can use approved clocks; funding period is not a retention classification.
 Do not claim production readiness from catalogue tests, UID-only trial protection or unchanged cleanup behavior.

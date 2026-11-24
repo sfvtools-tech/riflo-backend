@@ -1,3 +1,4 @@
+import { ProjectError } from '../../src/projects/service.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createGenerationWorker } from '../../src/generation/worker.js';
@@ -275,3 +276,17 @@ for (const outcome of ['success', 'failure', 'fixed-timeout'] as const) {
     assert.equal(renewals, 1, 'A late renewal must not recreate timers or access the SDK.');
   });
 }
+
+
+test('worker preserves retention authority failures without retrying', async () => {
+  const claim = { project: { id: 'project', uid: 'alice' }, batch: { deadline: 10000 }, stage: 'generate', slot: { id: 'output', feature: 'x_posts' } } as GenerationClaim;
+  let failed: Parameters<GenerationStore['fail']>[1] | undefined;
+  const store = {
+    claim: async () => claim,
+    transcript: async () => { throw new ProjectError(409, 'retention_unavailable', 'Account storage settings are unavailable.'); },
+    fail: async (_claim: GenerationClaim, failure: Parameters<GenerationStore['fail']>[1]) => { failed = failure; return true; },
+  } as unknown as GenerationStore;
+  await createGenerationWorker({ store, providers: {} as GenerationProviders, now: () => 1000 }).runOnce();
+  assert.equal(failed?.code, 'retention_unavailable');
+  assert.equal(failed?.retryable, false);
+});

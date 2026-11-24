@@ -24,7 +24,7 @@ test('actual paid output producers expose finite private HTTP contracts through 
   let clock = Date.parse('2026-10-01T00:00:00Z');
   const paidEnd = clock + 30 * day;
   const expiry = paidEnd + 60 * day;
-  const lifecycle = createLifecycleStore(db, { retentionEnabled: true, now: () => clock });
+  const lifecycle = createLifecycleStore(db, { now: () => clock });
   const projects = createProjectStore(db);
   const store = createGenerationStore(db);
   const assets = new Map<string, string>();

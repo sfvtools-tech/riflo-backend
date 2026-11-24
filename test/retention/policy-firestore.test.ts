@@ -27,7 +27,7 @@ function setup() {
   const db = getFirestore(app);
   const ref = db.collection('subscriptionGrants').doc(uid);
   let clock = start;
-  return { uid, app, db, ref, lifecycle: createLifecycleStore(db, { retentionEnabled: true, now: () => clock }), setNow: (value: number) => { clock = value; } };
+  return { uid, app, db, ref, lifecycle: createLifecycleStore(db, { now: () => clock }), setNow: (value: number) => { clock = value; } };
 }
 
 test('retention activation and renewal share one paid tenure without rewriting content', local, async () => {

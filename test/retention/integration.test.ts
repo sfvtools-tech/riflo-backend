@@ -25,7 +25,7 @@ async function fixture() {
   const account = db.collection('accounts').doc(uid);
   const grant = db.collection('subscriptionGrants').doc(uid);
   let clock = start;
-  const lifecycle = createLifecycleStore(db, { retentionEnabled: true, now: () => clock });
+  const lifecycle = createLifecycleStore(db, { now: () => clock });
   const projects = createProjectStore(db);
   const removed: string[] = [];
   const generation = createGenerationStore(db, { remove: async path => { removed.push(path); } });

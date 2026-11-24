@@ -97,11 +97,11 @@ export function applyGenerationConfiguration(availability: GenerationAvailabilit
 export const generationJobId = (projectId: string, batchId?: string) => !batchId || batchId === 'batch' ? projectId : `${projectId}-${batchId}`;
 export const generationEventId = (projectId: string, batchId: string | undefined, stage: string, slotId: string | null, attempt: number) => `${generationJobId(projectId, batchId)}-${stage}-${slotId ?? 'shared'}-${attempt}`;
 export type GenerationStore = {
-  lookup?: (uid: string, projectId: string, key: string, selection: Selection, brandRequest?: BrandRequest, intent?: GenerationBatch['intent'], controls?: GenerationControls) => Promise<GenerationBatch | null>;
+  lookup?: (uid: string, projectId: string, key: string, selection: Selection, brandRequest?: BrandRequest, intent?: GenerationBatch['intent'], controls?: GenerationControls, now?: number) => Promise<GenerationBatch | null>;
   availability?: (uid: string, projectId: string, now: number) => Promise<GenerationAvailability>;
   markProviderInvoked: (claim: GenerationClaim, metadata: ProviderRequest, now: number) => Promise<boolean>;
   start: (uid: string, projectId: string, key: string, selection: Selection, now: number, brand?: GenerationBrandContext, intent?: GenerationBatch['intent'], controls?: ControlsContext) => Promise<GenerationBatch>;
-  batch: (uid: string, projectId: string) => Promise<GenerationBatch | null>;
+  batch: (uid: string, projectId: string, now?: number) => Promise<GenerationBatch | null>;
   outputs: (uid: string, projectId: string, now: number, feature?: GenerationFeature) => Promise<GeneratedOutput[]>;
   output: (uid: string, projectId: string, outputId: string, now: number) => Promise<GeneratedOutput | null>;
   referencesAssets?: (uid: string, projectId: string, outputId: string, paths: readonly string[]) => Promise<boolean>;
@@ -145,7 +145,7 @@ export function createGenerationService({ store, now = Date.now, processingConfi
     async retryTranscription(uid: string, projectId: string, key: string, authorizeNewRequest?: () => Promise<void>) {
       if (!/^[A-Za-z0-9_-]{8,128}$/.test(key)) throw new GenerationError(400, 'invalid_idempotency_key', 'A valid Idempotency-Key is required.');
       const selection = { x_posts: 0, linkedin_posts: 0 };
-      const existing = await store.lookup?.(uid, projectId, key, selection, undefined, 'transcription_retry');
+      const existing = await store.lookup?.(uid, projectId, key, selection, undefined, 'transcription_retry', undefined, now());
       if (existing) return publicBatch(existing);
       if (!processingConfigured) throw new GenerationError(503, 'generation_not_configured', 'Transcription is not configured.');
       await authorizeNewRequest?.();
@@ -158,7 +158,7 @@ export function createGenerationService({ store, now = Date.now, processingConfi
       const selection = parseSelection(outputs);
       const brandRequest = parseBrandRequest((value as { brand?: unknown }).brand);
       const controlsRequest = parseGenerationControls((value as { controls?: unknown }).controls, selection);
-      const existing = await traceWorkerAwait('request.lookup', async () => store.lookup?.(uid, projectId, key, selection, brandRequest, undefined, controlsRequest), { projectId });
+      const existing = await traceWorkerAwait('request.lookup', async () => store.lookup?.(uid, projectId, key, selection, brandRequest, undefined, controlsRequest, now()), { projectId });
       if (existing) return publicBatch(existing);
       // Historical null counts normalized to zero; preserve their accepted replay only.
       if (outputs && Object.values(outputs).some(count => count === null)) throw new GenerationError(400, 'invalid_outputs', 'Choose valid output counts.');
@@ -180,7 +180,7 @@ export function createGenerationService({ store, now = Date.now, processingConfi
       return { ...availability, controls: { version: 1 as const, available: generationControlsAvailable && processingConfigured, threadAvailable: generationControlsAvailable && processingConfigured && Boolean(availability.credits), choices: controlChoices, focusMaxCharacters: 500, defaults: saved.defaults, builtins: builtinControls, defaultsStatus: saved.status } };
     },
     async get(uid: string, projectId: string) {
-      const batch = await store.batch(uid, projectId);
+      const batch = await store.batch(uid, projectId, now());
       if (!batch) throw new GenerationError(404, 'generation_not_found', 'Generation request not found.');
       return publicBatch(batch);
     },

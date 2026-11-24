@@ -54,7 +54,7 @@ function createApiFixture() {
       keys.set(`${input.uid}/retry/${input.key}`, input.id);
       return project;
     },
-    claim: unused, renew: unused, complete: unused, fail: unused, expiredSources: unused, finishCleanup: unused,
+    claim: unused, renew: unused, complete: unused, fail: unused, expiredSources: unused,
   };
   const service = createProjectService({ store, now: () => now, validateSource: async (uid, input) => {
     validateCalls++;
@@ -118,7 +118,8 @@ for (const access of ['active', 'inactive', 'denied'] as const) {
       project.storagePath = null;
       project.retryAvailableAt = now;
       if (status === 'source_expired') {
-        project.importedAt = now - 86_400_000;
+        project.sourceRetention = { kind: 'trial', startsAt: now - 15 * 86_400_000, version: 1, promisedUntil: now - 86_400_000 };
+        project.importedAt = now - 15 * 86_400_000;
         project.sourceExpiresAt = now - 1;
       }
       const usage = await fixture.store.usage('alice', now);
@@ -502,4 +503,24 @@ test('unknown-duration retry feedback uses current admission caps after an acces
     assert.equal((await request(`/v1/projects/${project.id}`, { token: 'alice' })).body.data.importRetry.allowance.requiredSeconds, 3600);
     assert.equal('sourceLimits' in (await request('/v1/usage', { token: 'alice' })).body.data, false);
   });
+});
+
+
+test('restore hints reject missing or malformed source policy but preserve failed restore retries', async () => {
+  const fixture = createApiFixture();
+  const created = await fixture.service.create('alice', { fileId: 'video-id' }, 'invalid-retention');
+  const project = fixture.projects.get(created.id)!;
+  project.status = 'source_expired';
+  project.sourceExpiresAt = now - 1;
+  for (const retention of [undefined, { version: 1, kind: 'paid' }]) {
+    Object.assign(project, { sourceRetention: retention });
+    assert.equal((await fixture.service.get('alice', project.id)).sourceRestore.available, false);
+  }
+  project.sourceRetention = { version: 1, kind: 'trial', startsAt: now, promisedUntil: now + 1000 };
+  project.sourceExpiresAt = null;
+  assert.equal((await fixture.service.get('alice', project.id)).sourceRestore.available, false);
+  project.status = 'failed';
+  project.importIntent = 'source_restore';
+  project.retryAvailableAt = now;
+  assert.equal((await fixture.service.get('alice', project.id)).sourceRestore.available, true);
 });

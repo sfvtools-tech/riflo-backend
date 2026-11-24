@@ -1,3 +1,4 @@
+import { contentDeadline } from '../helpers/retention.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -7,6 +8,7 @@ import { deleteApp, getApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import { createFirebaseDependencies } from '../../src/firebase.js';
+import { startTrial } from '../../src/access/lifecycle.js';
 import { createHandler } from '../../src/http/app.js';
 
 test('saved generation reads and private downloads survive absent AI configuration', {
@@ -25,9 +27,10 @@ test('saved generation reads and private downloads survive absent AI configurati
   const paths: string[] = [];
   const server = createServer(createHandler({...dependencies, verifyToken: async token => ({uid:token}), loadGrant: async () => null}));
   try {
+    await db.collection('subscriptionGrants').doc(uid).set({ ...startTrial(null, `trial-${uid}`, now - 29 * 86_400_000), retention: { version: 1, paidTenureId: null } });
     await project.set({uid,id:projectId,status:'source_expired'});
     await project.collection('generation').doc('batch').set({status:'completed',selection:{x_posts:1},slots:[],createdAt:now,updatedAt:now,errorCode:null});
-    const fields = {text:'Saved content remains private.',createdAt:now,expiresAt:now+86_400_000,model:'historical-model',promptVersion:'historical-prompt'};
+    const fields = {text:'Saved content remains private.',createdAt:now-29*86_400_000,...contentDeadline(now+86_400_000),model:'historical-model',promptVersion:'historical-prompt'};
     await project.collection('outputs').doc('text').set({...fields,id:'text',feature:'x_posts'});
     for (const blob of blobs) {
       const path=`accounts/${uid}/projects/${projectId}/${blob.id}.${blob.extension}`;
@@ -59,6 +62,7 @@ test('saved generation reads and private downloads survive absent AI configurati
     if(server.listening)await new Promise<void>(resolve=>server.close(()=>resolve()));
     await Promise.all(paths.map(path=>bucket.file(path).delete({ignoreNotFound:true})));
     await db.recursiveDelete(db.collection('accounts').doc(uid));
+    await db.collection('subscriptionGrants').doc(uid).delete();
     await db.terminate();
     await deleteApp(app);
   }

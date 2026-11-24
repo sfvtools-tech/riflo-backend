@@ -134,12 +134,12 @@ export function createProjectStore(db: Firestore): ProjectStore {
         const retentionOrigin = admittedRetention(access, input.now, retention);
         const sourceFunding = isSharedCreditGrant(grant) ? reserve(funding, ledgers, 'sourceSeconds', seconds) : undefined;
         const project: Project = {
-          ...(retentionOrigin ? { retentionOrigin, dedupVersion: 1 } : {}),
+          retentionOrigin,
           ...(sourceFunding ? { sourceFunding } : {}),
           ...(isSharedCreditGrant(grant) ? { accounting: { mode: 'shared_credits' as const, period } } : {}),
           preparation: 'pending', sourceLimits, id: input.id, importOperationId: createId(), uid: input.uid, input: input.input, source: input.source, status: 'queued',
           createdAt: input.now, updatedAt: input.now, deadline: input.now + operationalLimits.projectLifetimeHours * 3_600_000,
-          sourceRetentionDays: grant.sourceRetentionDays ?? operationalLimits.sourceRetentionDays, sourceAllowanceLimit: grant.limits.sourceSeconds, sourceExpiresAt: null, storagePath: null, attempts: 0, errorCode: null, period, reservedSourceSeconds: seconds,
+          sourceAllowanceLimit: grant.limits.sourceSeconds, sourceExpiresAt: null, storagePath: null, attempts: 0, errorCode: null, period, reservedSourceSeconds: seconds,
         };
         if (!sourceFunding) allowance.reserved.sourceSeconds! += seconds;
         writeLedgers(transaction, db, input.uid, ledgers);
@@ -176,10 +176,10 @@ export function createProjectStore(db: Firestore): ProjectStore {
         const retention = await readRetentionContext(db, input.uid, access, [project.sourceRetention, transcript?.retention, generation?.retentionOrigin], transaction);
         if (input.intent) {
           const effective = { ...project, sourceExpiresAt: sourceExpiry(project, retention) };
-          const sourceState = resolveRetention({ kind: 'source', expiresAt: project.sourceExpiresAt, retention: project.sourceRetention, importedAt: project.importedAt }, input.now, retention);
+          const sourceState = resolveRetention({ kind: 'source', retention: project.sourceRetention, importedAt: project.importedAt }, input.now, retention);
           if (!restorableSource(effective, input.now) || (!sourceState.valid && project.status !== 'failed')) throw new ProjectError(409, 'source_restore_not_available', 'Only an unavailable source copy can be restored.');
           if (generation && ['queued', 'transcribing', 'generating'].includes(generation.status)) throw new ProjectError(409, 'generation_in_progress', 'Wait for current content generation to finish before restoring the source.');
-          if (liveTranscript(transcript, generation, input.now, retention) && (!project.sourceSha256 || !/^[a-f0-9]{64}$/.test(project.sourceSha256) || transcript.sourceSha256 !== project.sourceSha256)) throw new ProjectError(409, 'source_identity_unverified', 'The original source identity cannot be verified for the retained transcript. Import this video as a new project; your retained content stays available.');
+          if (liveTranscript(transcript, input.now, retention) && (!project.sourceSha256 || !/^[a-f0-9]{64}$/.test(project.sourceSha256) || transcript.sourceSha256 !== project.sourceSha256)) throw new ProjectError(409, 'source_identity_unverified', 'The original source identity cannot be verified for the retained transcript. Import this video as a new project; your retained content stays available.');
         }
         const grant = activeGrant(access, input.now);
         const sourceLimits = resolveSourceLimits(access, input.now);
@@ -197,9 +197,8 @@ export function createProjectStore(db: Firestore): ProjectStore {
         if (seconds > remainingSeconds) throw new ProjectError(403, 'allowance_exceeded', `This import needs ${seconds} seconds of source video allowance; ${remainingSeconds} seconds remain. Other imported videos may have allowance reserved.`, undefined, { requiredSeconds: seconds, remainingSeconds });
         const retentionOrigin = admittedRetention(access, input.now, retention);
         const sourceFunding = isSharedCreditGrant(grant) ? reserve(funding, ledgers, 'sourceSeconds', seconds) : undefined;
-        const updated: Project = { ...project, ...(input.intent ? { importIntent: input.intent } : {}), sourceLimits, ...(retentionOrigin ? { retentionOrigin } : {}), ...(sourceFunding ? { sourceFunding } : {}), ...(isSharedCreditGrant(grant) ? { accounting: { mode: 'shared_credits' as const, period } } : {}), importOperationId: createId(), sourceRetentionDays: grant.sourceRetentionDays ?? operationalLimits.sourceRetentionDays, sourceAllowanceLimit: grant.limits.sourceSeconds, source: input.intent ? project.source : input.source, status: 'queued', retryAvailableAt: null, updatedAt: input.now, deadline: input.now + operationalLimits.projectLifetimeHours * 3_600_000, sourceExpiresAt: null, storagePath: null, errorCode: null, period, reservedSourceSeconds: seconds };
+        const updated: Project = { ...project, ...(input.intent ? { importIntent: input.intent } : {}), sourceLimits, retentionOrigin, ...(sourceFunding ? { sourceFunding } : {}), ...(isSharedCreditGrant(grant) ? { accounting: { mode: 'shared_credits' as const, period } } : {}), importOperationId: createId(), sourceAllowanceLimit: grant.limits.sourceSeconds, source: input.intent ? project.source : input.source, status: 'queued', retryAvailableAt: null, updatedAt: input.now, deadline: input.now + operationalLimits.projectLifetimeHours * 3_600_000, sourceExpiresAt: null, storagePath: null, errorCode: null, period, reservedSourceSeconds: seconds };
         if (!isSharedCreditGrant(grant)) { delete updated.accounting; delete updated.sourceFunding; }
-        if (!retentionOrigin) delete updated.retentionOrigin;
         delete updated.importProgress; delete updated.sourceRetention; delete updated.importedAt; delete updated.sourceCleanupAt; delete updated.importUpload;
         if (!input.intent && updated.preparation) updated.preparation = 'pending';
         if (!sourceFunding) allowance.reserved.sourceSeconds! += seconds;
@@ -267,8 +266,8 @@ export function createProjectStore(db: Firestore): ProjectStore {
         const ledgers = await readLedgers(transaction, db, uid, periods, true);
         const transcript = (await transaction.get(ref.collection('transcripts').doc('shared'))).data() as SavedTranscript | undefined;
         const retention = await readRetentionContext(db, uid, access, [project.sourceRetention, transcript?.retention], transaction);
-        const sourceState = resolveRetention({ kind: 'source', expiresAt: project.sourceExpiresAt, retention: project.sourceRetention, importedAt: project.importedAt }, now, retention);
-        if (sourceOnly && (!sourceState.valid || sourceAvailable(project, now, retention))) {
+        const sourceState = resolveRetention({ kind: 'source', retention: project.sourceRetention, importedAt: project.importedAt }, now, retention);
+        if (sourceOnly && project.status !== 'failed' && (!sourceState.valid || sourceAvailable(project, now, retention))) {
           if (sourceState.valid) transaction.update(ref, { sourceCleanupAt: sourceState.expiresAt });
           else {
             transaction.update(ref, { sourceCleanupAt: null, sourceCleanupError: 'retention_facts_unavailable' });
@@ -276,7 +275,7 @@ export function createProjectStore(db: Firestore): ProjectStore {
           }
           return undefined;
         }
-        const preserveTranscriptWork = sourceOnly && generation?.transcriptReady && generation.deadline > now && liveTranscript(transcript, generation, now, retention);
+        const preserveTranscriptWork = sourceOnly && generation?.transcriptReady && generation.deadline > now && liveTranscript(transcript, now, retention);
         const generationJobRef = db.collection('generationJobs').doc(generationJobId(id, generation?.id));
         const generationJob = (await transaction.get(generationJobRef)).data();
         const outputs = !sourceOnly ? await transaction.get(ref.collection('outputs').limit(50)) : null;
@@ -315,7 +314,6 @@ export function createProjectStore(db: Firestore): ProjectStore {
           const sourcePaths = [project.storagePath, ...Array.from({ length: project.attempts }, (_, index) => sourceAttemptPaths(uid, id, index + 1)).flat()].filter((path): path is string => path !== null);
           queueStorageCleanup(transaction, db.collection('assetCleanup').doc(`${id}-${sourceOnly ? 'expired' : 'deleted'}`), [...paths, ...sourcePaths], now, Math.max(project.deadline, generation?.deadline ?? 0));
         }
-        transaction.set(ref.collection('retentionDeletions').doc(`source-${id}`), { kind: 'source', deletedAt: now });
         if (!sourceOnly) {
           transaction.delete(ref.collection('transcripts').doc('shared'));
           transaction.update(ref, { payloadCleanupPending: true });
@@ -364,7 +362,7 @@ export function createProjectStore(db: Firestore): ProjectStore {
               if (runtime.active === project.id) runtime.active = null;
               else runtime.queued = Math.max(0, runtime.queued - 1);
               transaction.set(runtimeRef(job.uid), runtime);
-              transaction.update(ref, { status: 'failed', importProgress: FieldValue.delete(), retryAvailableAt: now + operationalLimits.importRetryCooldownSeconds * 1000, errorCode, reservedSourceSeconds: 0, updatedAt: now, sourceExpiresAt: now });
+              transaction.update(ref, { status: 'failed', importProgress: FieldValue.delete(), retryAvailableAt: now + operationalLimits.importRetryCooldownSeconds * 1000, errorCode, reservedSourceSeconds: 0, updatedAt: now, sourceExpiresAt: now, sourceCleanupAt: now });
               transaction.delete(candidate.ref);
               discardImportPreparation(transaction, project, now);
               if (job.workerId && job.startedAt !== null) finishEvent(transaction, { project, workerId: job.workerId, attempt: job.attempt, startedAt: job.startedAt, leaseUntil: now }, now, 'failed', null, errorCode);
@@ -475,13 +473,13 @@ export function createProjectStore(db: Firestore): ProjectStore {
         if (project.importIntent === 'source_restore') {
           if (!result.sourceSha256) throw new ProjectError(409, 'source_identity_unverified', 'The imported source identity could not be verified. Restore the source again.');
           if (project.sourceSha256 && result.sourceSha256 !== project.sourceSha256) throw new ProjectError(409, 'source_changed', 'The original video has changed. Import it as a new project; your retained content stays available.');
-          if (liveTranscript(transcript, generation, now, retention) && (!result.sourceSha256 || transcript.sourceSha256 !== result.sourceSha256)) throw new ProjectError(409, 'source_identity_unverified', 'The original source identity cannot be verified. Import this video as a new project; your retained content stays available.');
+          if (liveTranscript(transcript, now, retention) && (!result.sourceSha256 || transcript.sourceSha256 !== result.sourceSha256)) throw new ProjectError(409, 'source_identity_unverified', 'The original source identity cannot be verified. Import this video as a new project; your retained content stays available.');
         }
         const sourceRetention = retentionPolicy('source', project.retentionOrigin, retention, now);
-        const sourceExpiresAt = sourceRetention?.promisedUntil ?? now + (project.sourceRetentionDays ?? operationalLimits.sourceRetentionDays) * 86_400_000;
+        const sourceExpiresAt = sourceRetention.promisedUntil;
         const staged = transcript?.stagedImport;
         const matches = Boolean(staged && staged.operationId === project.importOperationId && staged.sourceSha256 === result.sourceSha256 && staged.durationSeconds === result.durationSeconds && transcript?.sourceSha256 === result.sourceSha256);
-        const promote = matches && liveTranscript({ ...transcript!, stagedImport: undefined }, generation, now, retention);
+        const promote = matches && liveTranscript({ ...transcript!, stagedImport: undefined }, now, retention);
         if (staged && !matches) throw new ProjectError(409, 'source_identity_unverified', 'The prepared transcript does not match this source.');
         if (staged && !promote) {
           transaction.delete(projectRef.collection('transcripts').doc('shared'));
@@ -493,14 +491,13 @@ export function createProjectStore(db: Firestore): ProjectStore {
         transaction.set(runtimeRef(project.uid), { ...runtime, active: pendingTranscript ? project.id : null });
         transaction.update(projectRef, {
           sourceSha256: result.sourceSha256 ?? FieldValue.delete(),
-          importedAt: now, ...(sourceRetention ? { sourceRetention } : {}), sourceCleanupAt: sourceExpiresAt,
+          importedAt: now, sourceRetention, sourceCleanupAt: sourceExpiresAt,
           status: 'source_ready', importProgress: FieldValue.delete(), importUpload: FieldValue.delete(), ...(project.preparation && project.importIntent !== 'source_restore' ? { preparation: promote ? 'ready' : pendingTranscript ? 'transcribing' : 'failed' } : {}), storagePath: result.storagePath, reservedSourceSeconds: 0, sourceAllowanceConsumed: true, updatedAt: now,
           source: { ...project.source, ...(result.mimeType ? { mimeType: result.mimeType } : {}), bytes: result.bytes, durationSeconds: result.durationSeconds, requiresProbe: false },
           sourceExpiresAt,
         });
         const obsoletePaths = Array.from({ length: Math.max(0, project.attempts - 1) }, (_, index) => sourceAttemptPaths(project.uid, project.id, index + 1)).flat().filter(path => path !== result.storagePath);
         queueStorageCleanup(transaction, db.collection('assetCleanup').doc(`${project.id}-source-unused`), obsoletePaths, now, Math.max(project.deadline, claim.leaseUntil));
-        if (project.importIntent === 'source_restore') transaction.delete(projectRef.collection('retentionDeletions').doc(`source-${project.id}`));
         transaction.delete(jobRef);
         finishEvent(transaction, claim, now, 'succeeded', result.bytes, null, actual);
         return true;
@@ -528,31 +525,19 @@ export function createProjectStore(db: Firestore): ProjectStore {
         } else {
           release(transaction, project, ledgers);
           transaction.set(runtimeRef(project.uid), { ...runtime, active: null });
-          transaction.update(projectRef, { status: 'failed', importProgress: FieldValue.delete(), retryAvailableAt: now + operationalLimits.importRetryCooldownSeconds * 1000, errorCode: code, reservedSourceSeconds: 0, updatedAt: now, sourceExpiresAt: now });
+          transaction.update(projectRef, { status: 'failed', importProgress: FieldValue.delete(), retryAvailableAt: now + operationalLimits.importRetryCooldownSeconds * 1000, errorCode: code, reservedSourceSeconds: 0, updatedAt: now, sourceExpiresAt: now, sourceCleanupAt: now });
           transaction.delete(jobRef);
           discardImportPreparation(transaction, project, now);
         }
         return true;
       });
     },
-    async finishCleanup(uid, id, now, expected) {
-      await db.runTransaction(async (transaction) => {
-        const ref = projects(uid).doc(id);
-        const project = (await transaction.get(ref)).data() as Project | undefined;
-        if (!project || !['deleted', 'source_expired', 'failed'].includes(project.status) || project.attempts !== expected.attempts || project.sourceExpiresAt !== expected.sourceExpiresAt || project.storagePath !== expected.storagePath) return;
-        // Cleared expiry keeps completed cleanup from filling every later scan.
-        transaction.update(ref, { storagePath: null, sourceCleanupAt: null, updatedAt: now });
-      });
-    },
     async expiredSources(now) {
-      let query = db.collectionGroup('projects').where('sourceExpiresAt', '<=', now).orderBy('sourceExpiresAt').limit(50);
+      let query = db.collectionGroup('projects').where('sourceCleanupAt', '<=', now).limit(50);
       if (cleanupCursor) query = query.startAfter(cleanupCursor);
-      const snapshot = await query.get();
-      // Advance past failed deletions too, then revisit them after the scan wraps.
-      cleanupCursor = snapshot.size === 50 ? snapshot.docs.at(-1) : undefined;
-      const managed = await db.collectionGroup('projects').where('sourceCleanupAt', '<=', now).limit(50).get();
-      const candidates = [...managed.docs, ...snapshot.docs.filter(doc => doc.data().sourceCleanupAt === undefined)];
-      return candidates.map((doc) => {
+      const candidates = await query.get();
+      cleanupCursor = candidates.size === 50 ? candidates.docs.at(-1) : undefined;
+      return candidates.docs.map((doc) => {
         const project = doc.data() as Project;
         return { uid: project.uid, id: project.id, storagePath: project.storagePath, attempts: project.attempts, sourceExpiresAt: project.sourceExpiresAt };
       });

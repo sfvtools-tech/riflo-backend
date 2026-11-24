@@ -6,13 +6,13 @@ const day = 86_400_000;
 const start = Date.parse('2026-10-01T00:00:00Z');
 const uid = 'policy-owner';
 const tenure = { id: 'paid-tenure', uid, startsAt: start + day, paidAccessEndsAt: start + 31 * day, revision: 1 };
-const context: RetentionContext = { uid, tenures: new Map([[tenure.id, tenure]]) };
+const context: RetentionContext = { uid, promotion: null, tenures: new Map([[tenure.id, tenure]]) };
 const trial = (promisedUntil: number): RetentionPolicy => ({ version: 1, kind: 'trial', startsAt: start, promisedUntil });
 const paid = (promisedUntil: number): RetentionPolicy => ({ version: 1, kind: 'paid', tenureId: tenure.id, promisedUntil });
 
 test('trial resources share the first initiation anchor, independently of import and read time', () => {
   for (const [kind, days] of [['source', 14], ['transcript', 30], ['output', 30]] as const) {
-    const resource = { kind, expiresAt: start + day, importedAt: start + 6 * day, retention: trial(start + day) };
+    const resource = { kind, importedAt: start + 6 * day, retention: trial(start + day) };
     const expiry = start + days * day;
     assert.equal(resolveRetention(resource, start + 7 * day, context).expiresAt, expiry, kind);
     assert.equal(resolveRetention(resource, expiry - 1, context).available, true, kind);
@@ -46,7 +46,7 @@ test('paid transcripts and outputs follow the actual paid end and contiguous ten
 
 test('trial or split funding cannot demote accepted paid retention or couple source and creation funds', () => {
   for (const funding of [[], [{ period: 'trial-period', credits: 2 }], [{ period: 'trial-period', credits: 1 }, { period: 'paid-period', credits: 1 }]]) {
-    const resource = { kind: 'output' as const, expiresAt: start + day, retention: paid(start + day), sourceFunding: [], charge: { funding } };
+    const resource = { kind: 'output' as const, retention: paid(start + day), sourceFunding: [], charge: { funding } };
     const resolved = resolveRetention(resource, start + 32 * day, context);
     assert.equal(resolved.available, true);
     assert.equal(resolved.expiresAt, tenure.paidAccessEndsAt + 60 * day);
@@ -54,7 +54,7 @@ test('trial or split funding cannot demote accepted paid retention or couple sou
 });
 
 test('reactivation extends a surviving archive through its retained tenure; a new tenure after expiry cannot revive it', () => {
-  const resource = { kind: 'output' as const, expiresAt: start + day, retention: paid(start + day) };
+  const resource = { kind: 'output' as const, retention: paid(start + day) };
   const archiveEnd = tenure.paidAccessEndsAt + 60 * day;
   const reactivated = { ...tenure, paidAccessEndsAt: archiveEnd + 31 * day, revision: 2 };
   const survivingFacts = { uid, tenures: new Map([[tenure.id, reactivated]]) };
@@ -96,12 +96,12 @@ test('promotion before each original deadline adopts paid clocks, while exact or
 
 test('source and transcript eligibility differ when promotion falls between day fourteen and thirty', () => {
   const facts = { ...context, promotion: { at: start + 20 * day, tenureId: tenure.id } };
-  assert.equal(resolveRetention({ kind: 'source', importedAt: start + day, expiresAt: start + 14 * day, retention: trial(start + 14 * day) }, start + 31 * day, facts).available, false);
-  assert.equal(resolveRetention({ kind: 'transcript', expiresAt: start + 30 * day, retention: trial(start + 30 * day) }, start + 31 * day, facts).available, true);
+  assert.equal(resolveRetention({ kind: 'source', importedAt: start + day, retention: trial(start + 14 * day) }, start + 31 * day, facts).available, false);
+  assert.equal(resolveRetention({ kind: 'transcript', retention: trial(start + 30 * day) }, start + 31 * day, facts).available, true);
 });
 
 test('promotion requires an actual paid tenure covering its recorded activation time', () => {
-  const resource = { kind: 'output' as const, expiresAt: start + 30 * day, retention: trial(start + 30 * day) };
+  const resource = { kind: 'output' as const, retention: trial(start + 30 * day) };
   for (const [at, startsAt, paidAccessEndsAt] of [
     [start + day, start + 100 * day, start + 130 * day],
     [start + day, start, start + day],
@@ -115,36 +115,47 @@ test('promotion requires an actual paid tenure covering its recorded activation 
 test('logical deletion defeats promotion, renewal and remaining promise floors', () => {
   const facts = { ...context, promotion: { at: start + day, tenureId: tenure.id } };
   for (const retention of [trial(start + 200 * day), paid(start + 200 * day)]) {
-    assert.equal(resolveRetention({ kind: 'output', expiresAt: start + 200 * day, retention: { ...retention, deletedAt: start + 2 * day } }, start + 3 * day, facts).available, false);
+    assert.equal(resolveRetention({ kind: 'output', retention: { ...retention, deletedAt: start + 2 * day } }, start + 3 * day, facts).available, false);
   }
 });
 
-test('legacy finite expiry stays fixed under current paid and promotion facts', () => {
+test('saved expiry without retention authority never authorizes delivery', () => {
   const facts = { ...context, promotion: { at: start, tenureId: tenure.id } };
   for (const kind of ['source', 'transcript', 'output'] as const) {
     const resource = { kind, expiresAt: start + day };
-    assert.equal(resolveRetention(resource, start, facts).expiresAt, start + day);
+    assert.equal(resolveRetention(resource, start, facts).expiresAt, null);
+    assert.equal(resolveRetention(resource, start, facts).valid, false);
     assert.equal(resolveRetention(resource, start + day, facts).available, false);
   }
 });
 
 test('nonfinite deadlines and malformed versioned metadata never authorize delivery', () => {
   for (const expiresAt of [undefined, null, '2026-11-01', NaN, Infinity, -Infinity]) {
-    assert.equal(resolveRetention({ kind: 'output', expiresAt }, start, context).available, false);
+    assert.equal(resolveRetention({ kind: 'output', retention: { ...paid(start + day), promisedUntil: expiresAt } }, start, context).available, false);
   }
   for (const retention of [{}, { ...paid(start + day), version: 2 }, { ...trial(start + day), startsAt: NaN }, { ...paid(start + day), promisedUntil: Infinity }]) {
-    const result = resolveRetention({ kind: 'output', expiresAt: start + day, retention }, start, context);
+    const result = resolveRetention({ kind: 'output', retention }, start, context);
     assert.equal(result.available, false);
     assert.equal(result.valid, false);
   }
 });
 
 test('missing and cross-owner tenure facts fail closed even with an unexpired stored promise', () => {
-  const resource = { kind: 'output' as const, expiresAt: start + 200 * day, retention: paid(start + 200 * day) };
+  const resource = { kind: 'output' as const, retention: paid(start + 200 * day) };
   for (const facts of [undefined, { uid, tenures: new Map() }, { uid, tenures: new Map([[tenure.id, { ...tenure, uid: 'another-owner' }]]) }]) {
     const result = resolveRetention(resource, start + 2 * day, facts);
     assert.equal(result.available, false);
     assert.equal(result.valid, false);
   }
-  assert.equal(resolveRetention({ kind: 'source', expiresAt: start + day, retention: paid(start + day) }, start, context).available, false, 'Mutable update timestamps cannot substitute for successful import.');
+  assert.equal(resolveRetention({ kind: 'source', retention: paid(start + day) }, start, context).available, false, 'Mutable update timestamps cannot substitute for successful import.');
+});
+
+test('unknown promotion history cannot expire trial content, while paid origins use their own tenure', () => {
+  const unknown = { uid, tenures: context.tenures };
+  for (const kind of ['source', 'transcript', 'output'] as const) {
+    const resource = { kind, importedAt: start, retention: trial(start + 30 * day) };
+    assert.equal(resolveRetention(resource, start + 40 * day, unknown).valid, false);
+    assert.equal(resolveRetention(resource, start + 40 * day, context).valid, true);
+  }
+  assert.equal(resolveRetention({ kind: 'output', retention: paid(start + 91 * day) }, start + 40 * day, unknown).available, true);
 });

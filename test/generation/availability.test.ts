@@ -1,3 +1,4 @@
+import { sourceDeadline } from '../helpers/retention.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Firestore } from 'firebase-admin/firestore';
@@ -7,14 +8,14 @@ import { createGenerationStore } from '../../src/generation/firestore.js';
 import { applyGenerationConfiguration, type GenerationAvailability } from '../../src/generation/service.js';
 
 const now = Date.parse('2026-10-18T12:00:00Z');
-const grant = { status: 'active' as const, startsAt: '2026-10-01T00:00:00Z', expiresAt: '2026-11-01T00:00:00Z', features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, 10])) as Record<typeof quotaKeys[number], number> };
+const grant = { retention: { version: 1 as const, paidTenureId: null }, status: 'active' as const, startsAt: '2026-10-01T00:00:00Z', expiresAt: '2026-11-01T00:00:00Z', features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, 10])) as Record<typeof quotaKeys[number], number> };
 const projectPath = 'accounts/alice/projects/project-id';
 
 // Only document reads are supported: a new query or account/profile lookup fails here.
 function snapshotStore(rawGrant: unknown, extra: Record<string, unknown> = {}) {
   const reads: string[] = [];
   const docs: Record<string, unknown> = {
-    [projectPath]: { status: 'source_ready', storagePath: 'source.mp4', sourceExpiresAt: now + 1000, source: { durationSeconds: 1 }, period: 'old-period', reservedSourceSeconds: 1 },
+    [projectPath]: { status: 'source_ready', storagePath: 'source.mp4', ...sourceDeadline(now + 1000), source: { durationSeconds: 1 }, period: 'old-period', reservedSourceSeconds: 1 },
     [`${projectPath}/generation/batch`]: undefined,
     [`${projectPath}/transcripts/shared`]: undefined,
     'subscriptionGrants/alice': rawGrant,

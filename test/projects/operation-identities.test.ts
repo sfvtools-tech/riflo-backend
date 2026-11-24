@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
+import { activatePaidPlan } from '../helpers/access.js';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import type { Firestore } from 'firebase-admin/firestore';
 import { createProjectStore } from '../../src/projects/firestore.js';
 import { createGenerationStore } from '../../src/generation/firestore.js';
 import { createGenerationService } from '../../src/generation/service.js';
-import { featureIds, quotaKeys } from '../../src/access/policy.js';
 
 const now = Date.parse('2026-10-18T12:00:00Z');
 const hash = (key: string) => createHash('sha256').update(key).digest('hex');
 // Exercise real store transactions against a tiny isolated document adapter; no Firebase initialization.
-function documents() {
+async function documents() {
   const saved = new Map<string, any>();
   const reference = (path: string): any => ({ path,
     collection: (name: string) => collection(`${path}/${name}`),
@@ -22,12 +22,12 @@ function documents() {
     set: (ref: any, data: any) => saved.set(ref.path, structuredClone(data)),
     create: (ref: any, data: any) => { assert.equal(saved.has(ref.path), false); saved.set(ref.path, structuredClone(data)); },
   }) } as unknown as Firestore;
-  saved.set('subscriptionGrants/alice', { status: 'active', startsAt: '2026-10-01T00:00:00Z', expiresAt: '2026-11-01T00:00:00Z', features: [...featureIds], limits: Object.fromEntries(quotaKeys.map(key => [key, 3600])) });
+  await activatePaidPlan(db, 'alice', now, Date.parse('2026-11-01T00:00:00Z'));
   return { db, saved };
 }
 
 test('durable import identities survive retries and accepted key replay bypasses new admission', async () => {
-  const { db, saved } = documents();
+  const { db, saved } = await documents();
   const store = createProjectStore(db);
   const input = { uid: 'alice', id: 'project', key: 'initial-key', input: { fileId: 'video-id' }, now,
     source: { fileId: 'video-id', name: 'Video', mimeType: 'video/mp4', bytes: 12, durationSeconds: 20, requiresProbe: false } };
@@ -54,7 +54,7 @@ test('durable import identities survive retries and accepted key replay bypasses
 });
 
 test('legacy accepted imports retain JSON recovery without inventing operation identities', async () => {
-  const { db, saved } = documents();
+  const { db, saved } = await documents();
   saved.set(`accounts/alice/intakeKeys/${hash('legacy-key')}`, { projectId: 'project', fingerprint: hash(JSON.stringify({ fileId: 'video-id' })) });
   saved.set('accounts/alice/projects/project', { id: 'project', status: 'source_ready' });
   const result = await createProjectStore(db).lookup('alice', 'legacy-key', { fileId: 'video-id' });
@@ -63,7 +63,7 @@ test('legacy accepted imports retain JSON recovery without inventing operation i
 });
 
 test('real generation lookup resolves archived accepted requests before provider and access gates', async () => {
-  const { db, saved } = documents();
+  const { db, saved } = await documents();
   const base = 'accounts/alice/projects/project';
   const selection = { x_posts: 1, linkedin_posts: 0 };
   saved.set(base, { id: 'project', status: 'source_expired' });
@@ -79,7 +79,7 @@ test('real generation lookup resolves archived accepted requests before provider
 });
 
 test('accepted UUID v4 import and generation identities replay unchanged', async () => {
-  const { db, saved } = documents();
+  const { db, saved } = await documents();
   const projectId = 'ef075f0f-7772-4d2e-932f-e026f0b5c016';
   const importId = 'cb141841-51d0-4b93-971b-69559a4f5bf1';
   const batchId = 'dc87a3b6-e195-4fc9-9f20-29bbba226e31';

@@ -8,11 +8,12 @@ import { runWorkerPass } from '../../src/worker-pass.js';
 import { runWorkerLoop } from '../../src/worker-loop.js';
 
 // Only the read-only query surface is simulated. Any transaction fails closed.
-function database(legacySources = 0) {
+function database(dueSources = 0) {
   const calls: string[] = [];
-  const rows = Array.from({ length: legacySources }, (_, i) => ({
+  const rows = Array.from({ length: dueSources }, (_, i) => ({
     index: i,
-    data: () => ({ uid: 'fixture', id: `source-${i}`, attempts: 1, sourceExpiresAt: 1, storagePath: null }),
+    due: true,
+    data: () => ({ uid: 'fixture', id: `source-${i}`, attempts: 1, sourceExpiresAt: 1, sourceCleanupAt: 1, storagePath: null }),
   }));
   function query(path: string, filter = '', after = -1, size = 50): object {
     return {
@@ -21,14 +22,14 @@ function database(legacySources = 0) {
       limit: (limit: number) => query(path, filter, after, limit),
       startAfter: (cursor: { index: number }) => query(path, filter, cursor.index, size),
       get: async () => {
-        calls.push(`${path}:${filter || 'legacy'}`);
-        const docs = path === 'projects' && filter === 'sourceExpiresAt' ? rows.slice(after + 1, after + 1 + size) : [];
+        calls.push(`${path}:${filter || 'unfiltered'}`);
+        const docs = path === 'projects' && filter === 'sourceCleanupAt' ? rows.filter(row => row.due && row.index > after).slice(0, size) : [];
         return { docs, empty: docs.length === 0, size: docs.length };
       },
     };
   }
   return {
-    calls,
+    calls, rows,
     db: { collection: query, collectionGroup: query, runTransaction: () => { throw Error('Unexpected transaction'); } } as unknown as Firestore,
   };
 }
@@ -51,7 +52,7 @@ test('generation stays unclaimed while one intake attempt is blocked', async () 
   console.log(JSON.stringify({ experiment: 'serial-intake-hold', heldMilliseconds, events }));
 });
 
-test('three idle passes count six queue queries; empty cleanup counts eleven queries', async () => {
+test('three idle passes count six queue queries; empty cleanup counts seven queries', async () => {
   const { db, calls } = database();
   const intake = createProjectStore(db);
   const generation = createGenerationStore(db, { remove: async () => { throw Error('Unexpected storage deletion'); } });
@@ -69,19 +70,28 @@ test('three idle passes count six queue queries; empty cleanup counts eleven que
   calls.length = 0;
   assert.deepEqual(await intake.expiredSources(1), []);
   await generation.cleanup(1);
-  assert.equal(calls.length, 11);
+  assert.equal(calls.length, 7);
   console.log(JSON.stringify({ experiment: 'idle-query-count', passes, elapsedMilliseconds: performance.now() - started, queueCalls, cleanupCalls: calls }));
 });
 
-test('legacy source cleanup reaches row 151 in four passes and wraps on pass five', async () => {
-  const { db, calls } = database(151);
+test('due source cleanup reaches all 151 candidates as completed or deferred rows leave the due set', async () => {
+  const { db, calls, rows } = database(151);
   const store = createProjectStore(db);
   const pages = [];
-  for (let pass = 0; pass < 5; pass++) pages.push(await store.expiredSources(1));
-  assert.deepEqual(pages.map(page => page.length), [50, 50, 50, 1, 50]);
+  for (let pass = 0; pass < 4; pass++) {
+    const page = await store.expiredSources(1);
+    pages.push(page);
+    // Successful cleanup clears the marker; deferred cleanup moves it beyond this pass.
+    const processed = new Set(page.map(source => source.id));
+    for (const row of rows) if (processed.has(row.data().id)) row.due = false;
+  }
+  assert.deepEqual(pages.map(page => page.length), [50, 50, 50, 1]);
   assert.equal(pages[3][0].id, 'source-150');
-  assert.equal(pages[4][0].id, 'source-0');
-  assert.equal(new Set(pages.slice(0, 4).flat().map(row => row.id)).size, 151);
-  assert.equal(calls.length, 10);
-  console.log(JSON.stringify({ experiment: 'legacy-source-pagination', rows: 151, pageSizes: pages.map(page => page.length), queryCalls: calls.length }));
+  assert.equal(new Set(pages.flat().map(row => row.id)).size, 151);
+  assert.deepEqual(await store.expiredSources(1), []);
+  rows[0].due = true;
+  assert.deepEqual((await store.expiredSources(1)).map(source => source.id), ['source-0'], 'newly due work is discovered without a stale cursor');
+  assert.equal(calls.length, 6);
+  assert.ok(calls.every(call => call === 'projects:sourceCleanupAt'));
+  console.log(JSON.stringify({ experiment: 'due-source-pagination', rows: 151, pageSizes: pages.map(page => page.length), queryCalls: calls.length }));
 });

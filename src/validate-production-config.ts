@@ -1,4 +1,4 @@
-import { readTrialConfig, readRetentionConfig, readTrialAbuseKey } from './config.js';
+import { readTrialConfig, readTrialAbuseKey } from './config.js';
 import { readGenerationConfig } from './generation/config.js';
 import { readDriveConfig } from './sources/drive/config.js';
 import { readYouTubeConfig } from './sources/config.js';
@@ -16,8 +16,7 @@ export function validateProductionConfig(env: NodeJS.ProcessEnv): void {
   readDriveConfig(env);
   readYouTubeConfig(env);
   const abuseKey = readTrialAbuseKey(env);
-  if (readTrialConfig(env) && (!readRetentionConfig(env) || !abuseKey)) throw new Error('Trial intake requires retention and an abuse key.');
-  readRetentionConfig(env);
+  if (readTrialConfig(env) && !abuseKey) throw new Error('Trial intake requires an abuse key.');
   withCors(() => undefined, env.CORS_ALLOWED_ORIGINS);
   for (const name of ['STREAM_MAX_MILLISECONDS', 'STREAM_MAX_ACTIVE', 'STREAM_MAX_PER_ACCOUNT', 'SOURCE_VALIDATION_MAX_ACTIVE', 'SOURCE_VALIDATION_MAX_PER_ACCOUNT', 'RIFLO_MEDIA_MAX_DIMENSION', 'RIFLO_MEDIA_MAX_PIXELS', 'RIFLO_MEDIA_MAX_FPS', 'RIFLO_MEDIA_MAX_STREAMS']) {
     if (env[name] !== undefined && (!Number.isSafeInteger(Number(env[name])) || Number(env[name]) < 1)) {

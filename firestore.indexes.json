@@ -33,10 +33,6 @@
         {
           "order": "DESCENDING",
           "queryScope": "COLLECTION"
-        },
-        {
-          "order": "ASCENDING",
-          "queryScope": "COLLECTION_GROUP"
         }
       ]
     },
@@ -51,10 +47,6 @@
         {
           "order": "DESCENDING",
           "queryScope": "COLLECTION"
-        },
-        {
-          "order": "ASCENDING",
-          "queryScope": "COLLECTION_GROUP"
         }
       ]
     },
@@ -69,10 +61,6 @@
         {
           "order": "DESCENDING",
           "queryScope": "COLLECTION"
-        },
-        {
-          "order": "ASCENDING",
-          "queryScope": "COLLECTION_GROUP"
         },
         {
           "arrayConfig": "CONTAINS",

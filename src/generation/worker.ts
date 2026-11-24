@@ -1,3 +1,4 @@
+import { ProjectError } from '../projects/service.js';
 import { traceWorkerAwait, workerTrace } from '../worker-trace.js';
 import { workerEvent } from '../worker-health.js';
 import { safeValidationIssue } from './diagnostics.js';
@@ -96,7 +97,7 @@ export function createGenerationWorker({ store, providers, now = Date.now, worke
         }
       } catch (error) {
         const validation = error instanceof GenerationError ? safeValidationIssue(Object.getOwnPropertyDescriptor(error, 'validation')?.value) : undefined;
-        const failure = { code: shutdown?.aborted && !completed ? 'worker_shutdown' : error instanceof GenerationError ? error.code : 'generation_failed', retryable: error instanceof GenerationError ? error.retryable : true, usage: completed?.usage ?? (error instanceof GenerationError ? error.usage : unknownUsage()), ...(validation ? { validation } : {}), ...(completed ? { provider: completed.provider, model: completed.model, rates: completed.rates, promptVersion: completed.promptVersion } : { ...metadata, model: error instanceof GenerationError ? error.model ?? metadata.model : metadata.model }) };
+        const failure = { code: shutdown?.aborted && !completed ? 'worker_shutdown' : error instanceof GenerationError || error instanceof ProjectError ? error.code : 'generation_failed', retryable: error instanceof GenerationError ? error.retryable : !(error instanceof ProjectError), usage: completed?.usage ?? (error instanceof GenerationError ? error.usage : unknownUsage()), ...(validation ? { validation } : {}), ...(completed ? { provider: completed.provider, model: completed.model, rates: completed.rates, promptVersion: completed.promptVersion } : { ...metadata, model: error instanceof GenerationError ? error.model ?? metadata.model : metadata.model }) };
         workerTrace('generation:attempt-failed', { ...trace, code: failure.code });
         const saved = await traceWorkerAwait('generation.save-failure', () => store.fail(claim, failure, now()), trace);
         // Resolve an ambiguous delivery commit before retiring its immutable media paths.
